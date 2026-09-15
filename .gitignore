@@ -1,0 +1,16 @@
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Configuración de Streamlit (si llegás a usar secretos)
+.streamlit/secrets.toml
+
+# Archivos de sistema operativo
+.DS_Store
+Thumbs.db
