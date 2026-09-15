@@ -5,14 +5,35 @@ from streamlit_folium import st_folium
 import pandas as pd
 import re
 from shapely.geometry import Point
+import requests
+import zipfile
+import io
 
 st.set_page_config(page_title="Mapa de Áreas Hidrocarburíferas", page_icon="🛢️", layout="wide")
-st.title("🗺️ Visor de Áreas Hidrocarburíferas")
 
-# Dejamos fijos los nombres de las columnas de tu archivo
 COL_NOMBRE = 'nombre'
 COL_OPERADORA = 'operador'
 
+# --- 1. FUNCIÓN DE ACTUALIZACIÓN AUTOMÁTICA ---
+def actualizar_datos():
+    # FEDE: Pegá acá el link que copiás haciendo clic derecho en el botón verde de "DESCARGAR"
+    url_zip = "https://portaldatosabiertos.neuquen.gov.ar/dataset/d726d6de-bf79-4302-bc5e-1f2b975fc9a3/resource/8750c10c-9ad9-473f-9862-a9b1dabaf7d4/download/areas_hidrocarburiferas.zip" 
+    
+    if url_zip == "LINK_DIRECTO_DEL_ZIP_ACA":
+        st.sidebar.error("Che, te olvidaste de poner el link de descarga en el código.")
+        return
+
+    try:
+        with st.spinner("Descargando e instalando mapa actualizado..."):
+            r = requests.get(url_zip)
+            z = zipfile.ZipFile(io.BytesIO(r.content))
+            z.extractall("data/")
+        st.sidebar.success("¡Datos actualizados al toque!")
+        st.cache_data.clear() # Limpiamos caché para obligar a leer los archivos nuevos
+    except Exception as e:
+        st.sidebar.error(f"Falló la descarga: {e}")
+
+# --- 2. CARGA DE DATOS ---
 @st.cache_data
 def cargar_datos():
     ruta_archivo = 'data/areas_hidrocarburiferas.shp'
@@ -30,28 +51,59 @@ except Exception as e:
     st.error(f"Error al cargar el mapa. Detalle: {e}")
     st.stop()
 
-# --- BARRA LATERAL ---
+# --- 3. ESTADOS PARA FILTROS EXCLUYENTES ---
+if 'area_elegida' not in st.session_state:
+    st.session_state.area_elegida = "TODAS"
+if 'operadora_elegida' not in st.session_state:
+    st.session_state.operadora_elegida = "TODAS"
+
+def reset_operadora():
+    st.session_state.operadora_elegida = "TODAS"
+
+def reset_area():
+    st.session_state.area_elegida = "TODAS"
+
+# --- 4. BARRA LATERAL ---
 with st.sidebar:
+    # Branding Sullair
+    try:
+        st.image("Logo Sullair Verde.png", use_container_width=True)
+    except:
+        st.warning("Falta el 'Logo Sullair Verde.png' en la carpeta.")
+        
     st.header("🔎 Filtros del Mapa")
     
-    # Extraemos todos los nombres de áreas y empresas que existen en tu archivo
     lista_areas = ["TODAS"] + sorted(gdf[COL_NOMBRE].dropna().astype(str).unique().tolist())
     lista_operadoras = ["TODAS"] + sorted(gdf[COL_OPERADORA].dropna().astype(str).unique().tolist())
     
-    # Armamos los selectores con la DATA REAL
-    area_elegida = st.selectbox("Iluminar un Área específica:", lista_areas)
-    operadora_elegida = st.selectbox("Iluminar por Empresa operadora:", lista_operadoras)
+    st.selectbox("Iluminar un Área específica:", lista_areas, key='area_elegida', on_change=reset_operadora)
+    st.selectbox("Iluminar por Empresa operadora:", lista_operadoras, key='operadora_elegida', on_change=reset_area)
     
     st.divider()
     
     st.header("📍 Buscar Coordenadas")
-    busqueda = st.text_input("Pegá un link de Maps o coordenadas (GMS o Decimales):")
-
-# --- MOTOR DE COORDENADAS MEJORADO ---
-def extraer_coordenadas(texto):
-    if not texto:
-        return None, None
+    busqueda = st.text_input("Pegá un link de Maps o coordenadas:")
     
+    st.divider()
+    
+    # Acá guardamos un espacio vacío para mostrar la data cuando hagas clic
+    st.header("📄 Información del Área")
+    info_placeholder = st.empty()
+    info_placeholder.info("👈 Hacé clic en un polígono del mapa para ver toda su data acá.")
+    
+    st.divider()
+    
+    if st.button("🔄 Actualizar Datos desde Neuquén", use_container_width=True):
+        actualizar_datos()
+
+    # Pie de página / Firma
+    st.divider()
+    st.caption("© 2026 - Desarrollado por Fede García Cendra para Sullair Argentina S.A.")
+    st.caption("Consultas a: fcendra@sullair.com.ar")
+
+# --- 5. MOTOR DE COORDENADAS ---
+def extraer_coordenadas(texto):
+    if not texto: return None, None
     match_dms = re.search(r'(\d+)°(\d+)\'([\d\.]+)"([NSns])\s*(\d+)°(\d+)\'([\d\.]+)"([EWOewo])', texto)
     if match_dms:
         lat_d, lat_m, lat_s, lat_dir, lon_d, lon_m, lon_s, lon_dir = match_dms.groups()
@@ -62,44 +114,31 @@ def extraer_coordenadas(texto):
         return lat, lon
 
     match_link = re.search(r'[-@/](-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)', texto)
-    if match_link:
-        return float(match_link.group(1)), float(match_link.group(2))
+    if match_link: return float(match_link.group(1)), float(match_link.group(2))
     
     match_dec = re.findall(r'-?\d{1,2}\.\d+', texto)
-    if len(match_dec) >= 2:
-        return float(match_dec[0]), float(match_dec[1])
-        
+    if len(match_dec) >= 2: return float(match_dec[0]), float(match_dec[1])
     return None, None
 
 lat_buscada, lon_buscada = extraer_coordenadas(busqueda)
 
-if busqueda:
-    if lat_buscada and lon_buscada:
-        st.success(f"Coordenadas detectadas: {lat_buscada:.5f}, {lon_buscada:.5f}")
-    else:
-        st.warning("No pude pescar las coordenadas.")
-
-# --- MAPA Y DIBUJO ---
+# --- 6. MAPA Y ESTILOS ---
 def estilo_iluminado(feature):
     nombre_area = str(feature['properties'].get(COL_NOMBRE))
     empresa = str(feature['properties'].get(COL_OPERADORA))
     
     iluminar = False
-    
-    # Lógica para prender las luces
-    if area_elegida != "TODAS" and nombre_area == area_elegida:
+    if st.session_state.area_elegida != "TODAS" and nombre_area == st.session_state.area_elegida:
         iluminar = True
-    elif operadora_elegida != "TODAS" and empresa == operadora_elegida:
+    elif st.session_state.operadora_elegida != "TODAS" and empresa == st.session_state.operadora_elegida:
         iluminar = True
-    elif area_elegida == "TODAS" and operadora_elegida == "TODAS":
-        # Si no hay nada filtrado, dejamos todo en un azul tranqui
+    elif st.session_state.area_elegida == "TODAS" and st.session_state.operadora_elegida == "TODAS":
         return {'fillColor': '#3388ff', 'color': 'black', 'weight': 1, 'fillOpacity': 0.4}
         
-    # Colores para cuando hay un filtro activo
     if iluminar:
-        return {'fillColor': '#00ff00', 'color': 'black', 'weight': 3, 'fillOpacity': 0.7} # Verde flúor para resaltar
+        return {'fillColor': '#00ff00', 'color': 'black', 'weight': 3, 'fillOpacity': 0.7}
     else:
-        return {'fillColor': '#cccccc', 'color': 'gray', 'weight': 1, 'fillOpacity': 0.1} # Gris transparente para apagar el resto
+        return {'fillColor': '#cccccc', 'color': 'gray', 'weight': 1, 'fillOpacity': 0.1}
 
 if lat_buscada and lon_buscada:
     centro = [lat_buscada, lon_buscada]
@@ -115,27 +154,35 @@ mapa = folium.Map(
     attr='Esri'
 )
 
-columnas_info = [col for col in gdf.columns if col != 'geometry']
-
+# Ya NO le pasamos el popup a GeoJson para que no moleste en el mapa
 folium.GeoJson(
     gdf,
     name='Áreas',
     style_function=estilo_iluminado,
-    tooltip=folium.GeoJsonTooltip(fields=[COL_NOMBRE, COL_OPERADORA]),
-    popup=folium.GeoJsonPopup(fields=columnas_info) 
+    tooltip=folium.GeoJsonTooltip(fields=[COL_NOMBRE, COL_OPERADORA])
 ).add_to(mapa)
 
-# --- CRUCE GEOGRÁFICO ---
 if lat_buscada and lon_buscada:
     punto = Point(lon_buscada, lat_buscada)
     folium.Marker([lat_buscada, lon_buscada], popup="📍 Punto Buscado", icon=folium.Icon(color="red")).add_to(mapa)
-    
     area_encontrada = gdf[gdf.geometry.contains(punto)]
     if not area_encontrada.empty:
-        nombre_enc = area_encontrada.iloc[0][COL_NOMBRE]
-        ope_enc = area_encontrada.iloc[0][COL_OPERADORA]
-        st.info(f"🎯 El punto cae en el área **{nombre_enc}** (Operada por: **{ope_enc}**)")
+        st.info(f"🎯 El punto cae en el área **{area_encontrada.iloc[0][COL_NOMBRE]}**")
     else:
         st.warning("⚠️ El punto no cae dentro de ninguna área concesionada.")
 
-st_folium(mapa, width=1200, height=650, returned_objects=[])
+# --- 7. RENDER Y CAPTURA DE CLIC ---
+# Capturamos toda la interacción del usuario con el mapa
+datos_mapa = st_folium(mapa, width=1200, height=650)
+
+# Si el usuario hizo clic en un área, llenamos el contenedor vacío de la barra lateral
+if datos_mapa and datos_mapa.get("last_active_drawing"):
+    propiedades = datos_mapa["last_active_drawing"]["properties"]
+    
+    # Armamos un dataframe chiquito para que se vea lindo
+    df_info = pd.DataFrame(list(propiedades.items()), columns=["Dato", "Valor"])
+    
+    # Metemos la info en el hueco que dejamos preparado en la barra lateral
+    with info_placeholder.container():
+        st.success(f"**{propiedades.get(COL_NOMBRE, 'Área seleccionada')}**")
+        st.dataframe(df_info, hide_index=True, use_container_width=True)
