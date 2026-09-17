@@ -592,7 +592,6 @@ if st.session_state.ultimas_coordenadas:
     
     info_detalle = f"&nbsp;|&nbsp; 🏢 <b>Operadora:</b> <b>{op}</b> &nbsp;|&nbsp; 🛢️ <b>Área:</b> <b>{area}</b>" if tiene_op else "&nbsp;|&nbsp; ℹ️ <i>Punto fuera de áreas catastradas</i>"
     
-    # Serialización JSON segura para evitar errores de sintaxis con comillas dobles/simples en JavaScript
     gms_json = json.dumps(gms_texto)
     gms_attr = html.escape(gms_texto)
     
@@ -672,47 +671,45 @@ if st.session_state.ultimas_coordenadas:
             <span class="coords-code">{gms_texto}</span>
             <span>{info_detalle}</span>
         </div>
-        <button id="btnCopy" class="btn-copy" type="button" data-coords="{gms_attr}">
+        <button id="btnCopy" class="btn-copy" type="button" onclick="copyCoords()">
             📋 Copiar
         </button>
     </div>
     <script>
-    (function() {{
-        const textToCopy = {gms_json};
+    window.copyCoords = function() {{
+        const text = {gms_json};
+        let success = false;
+        
+        try {{
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.setAttribute('readonly', '');
+            textarea.style.position = 'fixed';
+            textarea.style.left = '0';
+            textarea.style.top = '0';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            textarea.setSelectionRange(0, textarea.value.length);
+            success = document.execCommand('copy');
+            document.body.removeChild(textarea);
+        }} catch (e) {{
+            success = false;
+        }}
+        
+        if (!success && navigator.clipboard && window.isSecureContext) {{
+            navigator.clipboard.writeText(text).then(showSuccess).catch(function(err) {{
+                console.warn('Clipboard API:', err);
+            }});
+        }} else if (success) {{
+            showSuccess();
+        }}
+    }};
+
+    function showSuccess() {{
         const btn = document.getElementById('btnCopy');
-
-        btn.addEventListener('click', function() {{
-            let copied = false;
-            
-            // Método 1: Textarea con foco explícito (compatible con iframes)
-            try {{
-                const textarea = document.createElement('textarea');
-                textarea.value = textToCopy;
-                textarea.setAttribute('readonly', '');
-                textarea.style.position = 'absolute';
-                textarea.style.left = '-9999px';
-                textarea.style.top = '0';
-                document.body.appendChild(textarea);
-                textarea.focus();
-                textarea.select();
-                textarea.setSelectionRange(0, 99999);
-                copied = document.execCommand('copy');
-                document.body.removeChild(textarea);
-            }} catch (err) {{
-                copied = false;
-            }}
-
-            // Método 2: Clipboard API si está habilitada
-            if (!copied && navigator.clipboard && window.isSecureContext) {{
-                navigator.clipboard.writeText(textToCopy).then(showSuccess).catch(function(e) {{
-                    console.error("Error al copiar:", e);
-                }});
-            }} else if (copied) {{
-                showSuccess();
-            }}
-        }});
-
-        function showSuccess() {{
+        if (btn) {{
             btn.innerText = '✅ ¡Copiado!';
             btn.style.backgroundColor = '#1b5e20';
             setTimeout(function() {{
@@ -720,7 +717,7 @@ if st.session_state.ultimas_coordenadas:
                 btn.style.backgroundColor = '{btn_color}';
             }}, 2000);
         }}
-    }})();
+    }}
     </script>
     </body>
     </html>
