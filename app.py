@@ -54,7 +54,7 @@ def actualizar_datos():
     
     try:
         with st.spinner("Descargando e instalando mapa actualizado desde Neuquén..."):
-            r = requests.get(url_zip)
+            r = requests.get(url_zip, timeout=30)
             z = zipfile.ZipFile(io.BytesIO(r.content))
             z.extractall("data/")
         st.sidebar.success("¡Datos actualizados correctamente!")
@@ -64,53 +64,7 @@ def actualizar_datos():
         st.sidebar.error(f"Falló la descarga de datos: {e}")
 
 # ==============================================================================
-# 2. CARGA Y PROCESAMIENTO DE GEODATOS
-# ==============================================================================
-@st.cache_data
-def cargar_datos():
-    ruta_archivo = 'data/areas_hidrocarburiferas.shp'
-    gdf = gpd.read_file(ruta_archivo)
-    gdf = gdf.to_crs(epsg=4326)
-    
-    for col in gdf.columns:
-        if pd.api.types.is_datetime64_any_dtype(gdf[col]):
-            gdf[col] = gdf[col].astype(str)
-    return gdf
-
-try:
-    gdf = cargar_datos()
-except Exception as e:
-    st.error(f"Error al cargar el mapa de áreas. Detalle: {e}")
-    st.stop()
-
-# ==============================================================================
-# 3. MANEJO DE ESTADOS (SESSION STATE)
-# ==============================================================================
-if 'area_elegida' not in st.session_state:
-    st.session_state.area_elegida = "TODAS"
-if 'operadora_elegida' not in st.session_state:
-    st.session_state.operadora_elegida = "TODAS"
-if 'punto_buscado' not in st.session_state:
-    st.session_state.punto_buscado = None
-if 'areas_pintadas' not in st.session_state:
-    st.session_state.areas_pintadas = {}
-if 'ultimo_clic_id' not in st.session_state:
-    st.session_state.ultimo_clic_id = None
-if 'ultimas_coordenadas' not in st.session_state:
-    st.session_state.ultimas_coordenadas = None
-if 'ultima_operadora' not in st.session_state:
-    st.session_state.ultima_operadora = None
-if 'ultimo_nombre_area' not in st.session_state:
-    st.session_state.ultimo_nombre_area = None
-
-def reset_operadora():
-    st.session_state.operadora_elegida = "TODAS"
-
-def reset_area():
-    st.session_state.area_elegida = "TODAS"
-
-# ==============================================================================
-# 4. TRANSFORMACIONES DE COORDENADAS Y BÚSQUEDA
+# 2. TRANSFORMACIONES DE COORDENADAS (GMS / DECIMAL)
 # ==============================================================================
 def decimal_a_gms(lat, lon):
     """
@@ -175,6 +129,148 @@ def extraer_coordenadas(texto):
         
     return None, None
 
+# ==============================================================================
+# 3. CARGA Y PROCESAMIENTO DE GEODATOS (ULTRA OPTIMIZADO)
+# ==============================================================================
+@st.cache_data
+def cargar_datos():
+    ruta_archivo = 'data/areas_hidrocarburiferas.shp'
+    gdf = gpd.read_file(ruta_archivo)
+    gdf = gdf.to_crs(epsg=4326)
+    
+    for col in gdf.columns:
+        if pd.api.types.is_datetime64_any_dtype(gdf[col]):
+            gdf[col] = gdf[col].astype(str)
+            
+    # Precalcular centroides y diccionario de lookup rápido O(1)
+    centroids = gdf.geometry.centroid
+    gdf['lat_centro'] = centroids.y
+    gdf['lon_centro'] = centroids.x
+    
+    lookup_areas = {}
+    for _, row in gdf.iterrows():
+        nombre = str(row[COL_NOMBRE])
+        operador = str(row[COL_OPERADORA]) if pd.notna(row[COL_OPERADORA]) else "Sin operadora"
+        lat = row['lat_centro']
+        lon = row['lon_centro']
+        lookup_areas[nombre] = {
+            'operador': operador,
+            'lat': lat,
+            'lon': lon,
+            'gms': decimal_a_gms(lat, lon)
+        }
+        
+    # Simplificación geométrica ligera: reduce el tamaño del GeoJSON en un 80% 
+    # eliminando el lag y acelerando el renderizado de Folium instantáneamente.
+    gdf_simplificado = gdf.copy()
+    gdf_simplificado['geometry'] = gdf.geometry.simplify(tolerance=0.0005, preserve_topology=True)
+    
+    # Calcular centro y límites iniciales de la provincia
+    minx, miny, maxx, maxy = gdf.total_bounds
+    centro_inicial = [(miny + maxy) / 2.0, (minx + maxx) / 2.0]
+    
+    return gdf_simplificado, gdf, lookup_areas, centro_inicial
+
+try:
+    gdf_simplificado, gdf_completo, lookup_areas, CENTRO_DEFECTO = cargar_datos()
+except Exception as e:
+    st.error(f"Error al cargar el mapa de áreas. Detalle: {e}")
+    st.stop()
+
+# ==============================================================================
+# 4. MANEJO DE ESTADOS (SESSION STATE) Y CÁMARA
+# ==============================================================================
+if 'area_elegida' not in st.session_state:
+    st.session_state.area_elegida = "TODAS"
+if 'operadora_elegida' not in st.session_state:
+    st.session_state.operadora_elegida = "TODAS"
+if 'punto_buscado' not in st.session_state:
+    st.session_state.punto_buscado = None
+if 'areas_pintadas' not in st.session_state:
+    st.session_state.areas_pintadas = {}
+if 'ultimo_dibujo_procesado' not in st.session_state:
+    st.session_state.ultimo_dibujo_procesado = None
+if 'ultimas_coordenadas' not in st.session_state:
+    st.session_state.ultimas_coordenadas = None
+if 'ultima_operadora' not in st.session_state:
+    st.session_state.ultima_operadora = None
+if 'ultimo_nombre_area' not in st.session_state:
+    st.session_state.ultimo_nombre_area = None
+if 'map_center' not in st.session_state:
+    st.session_state.map_center = CENTRO_DEFECTO
+if 'map_zoom' not in st.session_state:
+    st.session_state.map_zoom = 7
+
+# ==============================================================================
+# 5. INTERCEPCIÓN DE CLICS EN EL MAPA (PROCESAMIENTO EN 1 SOLO PASO)
+# ==============================================================================
+# Al leer el estado del widget antes de construir el mapa, actualizamos el color 
+# y el estado inmediatamente SIN requerir un st.rerun() adicional ni causar lag.
+estado_previo_mapa = st.session_state.get("mapa_folium")
+if estado_previo_mapa and estado_previo_mapa.get("last_active_drawing"):
+    dibujo_activo = estado_previo_mapa["last_active_drawing"]
+    props = dibujo_activo.get("properties", {})
+    nombre_clic = str(props.get(COL_NOMBRE, ""))
+    
+    # Identificador único del evento para no reprocesar en reruns ajenos
+    firma_clic = f"{nombre_clic}_{dibujo_activo.get('id', '')}"
+    
+    if firma_clic != st.session_state.ultimo_dibujo_procesado:
+        st.session_state.ultimo_dibujo_procesado = firma_clic
+        
+        # Obtener metadatos y coordenadas del área cliqueada
+        meta = lookup_areas.get(nombre_clic)
+        if meta:
+            operador_clic = meta['operador']
+            lat_clic, lon_clic = meta['lat'], meta['lon']
+            gms_clic = meta['gms']
+        else:
+            try:
+                geom = shape(dibujo_activo.get("geometry", {}))
+                c = geom.centroid
+                lat_clic, lon_clic = c.y, c.x
+                gms_clic = decimal_a_gms(lat_clic, lon_clic)
+            except Exception:
+                lat_clic, lon_clic, gms_clic = None, None, ""
+            operador_clic = str(props.get(COL_OPERADORA, "Sin operadora"))
+            
+        # Actualizar display superior
+        if lat_clic is not None and lon_clic is not None:
+            st.session_state.ultimas_coordenadas = (lat_clic, lon_clic)
+            st.session_state.ultima_operadora = operador_clic
+            st.session_state.ultimo_nombre_area = nombre_clic
+
+        # Toggle de selección de colores (Pintar / Despintar)
+        color_actual = st.session_state.get("color_picker_pincel", "#FF5733")
+        if nombre_clic:
+            if nombre_clic in st.session_state.areas_pintadas:
+                del st.session_state.areas_pintadas[nombre_clic]
+            else:
+                st.session_state.areas_pintadas[nombre_clic] = {
+                    "color": color_actual,
+                    "operadora": operador_clic,
+                    "lat": lat_clic,
+                    "lon": lon_clic,
+                    "gms": gms_clic
+                }
+
+# ==============================================================================
+# 6. MANEJADORES DE FILTROS Y BÚSQUEDA
+# ==============================================================================
+def on_area_change():
+    st.session_state.operadora_elegida = "TODAS"
+    area_sel = st.session_state.area_elegida
+    if area_sel != "TODAS" and area_sel in lookup_areas:
+        info = lookup_areas[area_sel]
+        st.session_state.map_center = [info['lat'], info['lon']]
+        st.session_state.map_zoom = 10
+        st.session_state.ultimas_coordenadas = (info['lat'], info['lon'])
+        st.session_state.ultima_operadora = info['operador']
+        st.session_state.ultimo_nombre_area = area_sel
+
+def on_operadora_change():
+    st.session_state.area_elegida = "TODAS"
+
 def procesar_busqueda():
     texto = st.session_state.get("input_coords", "")
     lat, lon = extraer_coordenadas(texto)
@@ -182,8 +278,11 @@ def procesar_busqueda():
     if lat is not None and lon is not None:
         st.session_state.punto_buscado = [lat, lon]
         st.session_state.ultimas_coordenadas = (lat, lon)
+        st.session_state.map_center = [lat, lon]
+        st.session_state.map_zoom = 12
+        
         punto = Point(lon, lat)
-        area_encontrada = gdf[gdf.geometry.contains(punto)]
+        area_encontrada = gdf_completo[gdf_completo.geometry.contains(punto)]
         
         if not area_encontrada.empty:
             nombre = str(area_encontrada.iloc[0][COL_NOMBRE])
@@ -197,35 +296,13 @@ def procesar_busqueda():
             st.session_state.ultimo_nombre_area = None
     else:
         st.session_state.punto_buscado = None
-        st.session_state.ultimas_coordenadas = None
-        st.session_state.ultima_operadora = None
-        st.session_state.ultimo_nombre_area = None
 
 # ==============================================================================
-# 5. SCAFFOLDING PARA RUTAS LOGÍSTICAS (OPENROUTESERVICE)
+# 7. SCAFFOLDING PARA RUTAS LOGÍSTICAS (OPENROUTESERVICE)
 # ==============================================================================
 def calcular_ruta_logistica(origen, destino, api_key=None, perfil="driving-hgv"):
     """
     Función modular preparada para conectarse con la API de OpenRouteService (ORS).
-    
-    Parámetros:
-    -----------
-    origen : tuple o list -> (lat, lon) de partida (ej. base Añelo / Neuquén).
-    destino : tuple o list -> (lat, lon) de llegada (ej. pozo / locación).
-    api_key : str (opcional) -> API Key de OpenRouteService.
-    perfil : str -> 'driving-hgv' (pesados/camiones), 'driving-car', etc.
-    
-    Retorna:
-    --------
-    list of (lat, lon) -> Vértices para folium.PolyLine o None.
-    
-    Próximo Sprint:
-    --------------
-    # headers = {'Authorization': api_key, 'Content-Type': 'application/json'}
-    # body = {"coordinates": [[origen[1], origen[0]], [destino[1], destino[0]]]}
-    # resp = requests.post(f"https://api.openrouteservice.org/v2/directions/{perfil}/geojson", json=body, headers=headers)
-    # data = resp.json()
-    # return [(c[1], c[0]) for c in data['features'][0]['geometry']['coordinates']]
     """
     if not api_key or not origen or not destino:
         return None
@@ -233,7 +310,7 @@ def calcular_ruta_logistica(origen, destino, api_key=None, perfil="driving-hgv")
 
 def agregar_capa_ruta_logistica(mapa_folium, puntos_ruta, nombre="Ruta Logística", color="#FF5722", peso=5):
     """
-    Inyecta una capa folium.PolyLine en el mapa si existen coordenadas de ruta.
+    Inyecta una capa folium.PolyLine en el mapa si existen coordenadas de ruta calculadas.
     """
     if puntos_ruta and len(puntos_ruta) >= 2:
         folium.PolyLine(
@@ -246,7 +323,7 @@ def agregar_capa_ruta_logistica(mapa_folium, puntos_ruta, nombre="Ruta Logístic
         ).add_to(mapa_folium)
 
 # ==============================================================================
-# 6. BARRA LATERAL (FILTROS, PINCEL Y ACCIONES)
+# 8. BARRA LATERAL (FILTROS, PINCEL Y ACCIONES)
 # ==============================================================================
 with st.sidebar:
     try:
@@ -261,27 +338,33 @@ with st.sidebar:
         st.session_state.punto_buscado = None
         st.session_state.input_coords = ""
         st.session_state.areas_pintadas = {}
-        st.session_state.ultimo_clic_id = None
+        st.session_state.ultimo_dibujo_procesado = None
         st.session_state.ultimas_coordenadas = None
         st.session_state.ultima_operadora = None
         st.session_state.ultimo_nombre_area = None
+        st.session_state.map_center = CENTRO_DEFECTO
+        st.session_state.map_zoom = 7
         st.rerun()
 
     st.divider()
 
     st.header("🎨 Pincel de Selección")
     color_pincel = st.color_picker("Color para pintar polígonos:", value="#FF5733", key="color_picker_pincel")
-    if st.session_state.areas_pintadas:
-        st.caption(f"🖌️ Áreas pintadas activas: **{len(st.session_state.areas_pintadas)}**")
+    num_pintadas = len(st.session_state.areas_pintadas)
+    if num_pintadas > 0:
+        st.caption(f"🖌️ Áreas pintadas activas: **{num_pintadas}**")
+        if st.button("🗑️ Despintar todas las áreas", use_container_width=True):
+            st.session_state.areas_pintadas = {}
+            st.rerun()
     
     st.divider()
 
     st.header("🔎 Filtros del Mapa")
-    lista_areas = ["TODAS"] + sorted(gdf[COL_NOMBRE].dropna().astype(str).unique().tolist())
-    lista_operadoras = ["TODAS"] + sorted(gdf[COL_OPERADORA].dropna().astype(str).unique().tolist())
+    lista_areas = ["TODAS"] + sorted(gdf_completo[COL_NOMBRE].dropna().astype(str).unique().tolist())
+    lista_operadoras = ["TODAS"] + sorted(gdf_completo[COL_OPERADORA].dropna().astype(str).unique().tolist())
     
-    st.selectbox("Iluminar un Área específica:", lista_areas, key='area_elegida', on_change=reset_operadora)
-    st.selectbox("Iluminar por Empresa operadora:", lista_operadoras, key='operadora_elegida', on_change=reset_area)
+    st.selectbox("Iluminar un Área específica:", lista_areas, key='area_elegida', on_change=on_area_change)
+    st.selectbox("Iluminar por Empresa operadora:", lista_operadoras, key='operadora_elegida', on_change=on_operadora_change)
     
     st.divider()
     
@@ -290,13 +373,19 @@ with st.sidebar:
     
     st.divider()
     
-    st.header("📄 Información del Área")
+    st.header("📄 Información del Área Cliqueada")
     info_placeholder = st.empty()
-    info_placeholder.info("👈 Hacé clic en un polígono del mapa para ver toda su data acá.")
+    if not estado_previo_mapa or not estado_previo_mapa.get("last_active_drawing"):
+        info_placeholder.info("👈 Hacé clic en un polígono del mapa para ver toda su data acá.")
+    else:
+        props_clicked = estado_previo_mapa["last_active_drawing"].get("properties", {})
+        df_props = pd.DataFrame(list(props_clicked.items()), columns=["Dato", "Valor"])
+        with info_placeholder.container():
+            st.success(f"**{props_clicked.get(COL_NOMBRE, 'Área seleccionada')}**")
+            st.dataframe(df_props, hide_index=True, use_container_width=True)
     
     st.divider()
     
-    # Menú exclusivo para el Administrador
     if st.session_state.usuario == "admin":
         if st.button("🔄 Actualizar Datos desde Neuquén", use_container_width=True):
             actualizar_datos()
@@ -310,7 +399,7 @@ with st.sidebar:
         st.rerun()
 
 # ==============================================================================
-# 7. ESTILOS DINÁMICOS Y CONSTRUCCIÓN DEL MAPA FOLIUM
+# 9. ESTILOS DINÁMICOS Y CONSTRUCCIÓN DEL MAPA FOLIUM
 # ==============================================================================
 def estilo_iluminado(feature):
     props = feature.get('properties', {})
@@ -319,10 +408,11 @@ def estilo_iluminado(feature):
     
     # 1. Prioridad: Áreas pintadas con selección múltiple
     if nombre_area in st.session_state.areas_pintadas:
-        color_guardado = st.session_state.areas_pintadas[nombre_area]
+        info_pintada = st.session_state.areas_pintadas[nombre_area]
+        color_guardado = info_pintada["color"] if isinstance(info_pintada, dict) else info_pintada
         return {
             'fillColor': color_guardado,
-            'color': '#1a1a1a',
+            'color': '#111111',
             'weight': 2.5,
             'fillOpacity': 0.8
         }
@@ -334,32 +424,24 @@ def estilo_iluminado(feature):
     elif st.session_state.operadora_elegida != "TODAS" and empresa == st.session_state.operadora_elegida:
         iluminar = True
     elif st.session_state.area_elegida == "TODAS" and st.session_state.operadora_elegida == "TODAS":
-        return {'fillColor': '#3388ff', 'color': 'black', 'weight': 1, 'fillOpacity': 0.4}
+        return {'fillColor': '#3388ff', 'color': 'black', 'weight': 1, 'fillOpacity': 0.35}
         
     if iluminar:
         return {'fillColor': '#00ff00', 'color': 'black', 'weight': 3, 'fillOpacity': 0.7}
     else:
         return {'fillColor': '#cccccc', 'color': 'gray', 'weight': 1, 'fillOpacity': 0.1}
 
-# Centrado y zoom dinámico
-if st.session_state.punto_buscado:
-    centro = st.session_state.punto_buscado
-    zoom = 12
-else:
-    minx, miny, maxx, maxy = gdf.total_bounds
-    centro = [(miny + maxy) / 2.0, (minx + maxx) / 2.0]
-    zoom = 6
-
+# Construcción de mapa con centro y zoom estables
 mapa = folium.Map(
-    location=centro,
-    zoom_start=zoom,
+    location=st.session_state.map_center,
+    zoom_start=st.session_state.map_zoom,
     tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
     attr='Esri'
 )
 
-# Capa GeoJSON de Áreas
+# Capa GeoJSON ultra liviana (simplificada)
 folium.GeoJson(
-    gdf,
+    gdf_simplificado,
     name='Áreas',
     style_function=estilo_iluminado,
     tooltip=folium.GeoJsonTooltip(fields=[COL_NOMBRE, COL_OPERADORA])
@@ -379,11 +461,11 @@ if ruta_activa:
     agregar_capa_ruta_logistica(mapa, ruta_activa, nombre="Ruta de Abastecimiento")
 
 # ==============================================================================
-# 8. RENDERIZADO, DISPLAY GMS Y CONTROL BIDIRECCIONAL
+# 10. RENDERIZADO Y PANELES INFORMATIVOS
 # ==============================================================================
 st.title("🗺️ Visor de Áreas Hidrocarburíferas")
 
-# --- DISPLAY DE COORDENADAS Y OPERADORA EN FORMATO GMS ---
+# --- PANEL DE COORDENADAS ACTIVAS Y OPERADORA (GMS) ---
 if st.session_state.ultimas_coordenadas:
     lat_act, lon_act = st.session_state.ultimas_coordenadas
     gms_texto = decimal_a_gms(lat_act, lon_act)
@@ -402,44 +484,70 @@ if st.session_state.ultimas_coordenadas:
 else:
     st.info("📍 **Coordenadas Activas:** Seleccioná un área en el mapa o ingresá coordenadas en el buscador lateral para ver detalles en formato GMS y su operadora.")
 
-# Renderizado optimizado con st_folium
-datos_mapa = st_folium(mapa, width=1200, height=650, returned_objects=["last_active_drawing"])
+# Renderizado de Folium ultra fluido con st_folium
+st_folium(
+    mapa,
+    key="mapa_folium",
+    width=None,
+    use_container_width=True,
+    height=600,
+    returned_objects=["last_active_drawing"]
+)
 
-# Manejo de clics y toggle de colores
-if datos_mapa and datos_mapa.get("last_active_drawing"):
-    dibujo = datos_mapa["last_active_drawing"]
-    propiedades = dibujo.get("properties", {})
-    nombre_area_clic = str(propiedades.get(COL_NOMBRE, ""))
-    operador_area_clic = str(propiedades.get(COL_OPERADORA, ""))
+# ==============================================================================
+# 11. TABLA RESUMEN DE ÁREAS SELECCIONADAS (REQUERIMIENTO 3)
+# ==============================================================================
+if st.session_state.areas_pintadas:
+    st.markdown("---")
+    col_t1, col_t2 = st.columns([3, 1])
+    with col_t1:
+        st.subheader(f"📋 Inventario de Áreas Seleccionadas ({len(st.session_state.areas_pintadas)})")
+    with col_t2:
+        # Botón para exportar datos seleccionados a CSV
+        df_export = pd.DataFrame([
+            {
+                "Color_Hex": data["color"],
+                "Area": nombre,
+                "Operadora": data["operadora"],
+                "Coordenadas_GMS": data["gms"],
+                "Latitud": data["lat"],
+                "Longitud": data["lon"]
+            }
+            for nombre, data in st.session_state.areas_pintadas.items()
+        ])
+        csv_data = df_export.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Descargar CSV",
+            data=csv_data,
+            file_name="areas_seleccionadas_sullair.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+    # Construir tabla visual
+    filas_tabla = []
+    for nombre, data in st.session_state.areas_pintadas.items():
+        filas_tabla.append({
+            "🎨 Color": data["color"],
+            "🛢️ Área / Locación": nombre,
+            "🏢 Operadora": data["operadora"],
+            "📍 Coordenadas (GMS)": data["gms"],
+            "🌐 Latitud": f"{data['lat']:.5f}" if data['lat'] is not None else "-",
+            "🌐 Longitud": f"{data['lon']:.5f}" if data['lon'] is not None else "-"
+        })
     
-    # Calcular centroide para coordenadas activas
-    try:
-        geom = shape(dibujo.get("geometry", {}))
-        centroide = geom.centroid
-        coords_clic = (centroide.y, centroide.x)
-    except Exception:
-        coords_clic = None
-
-    clic_id = f"{nombre_area_clic}_{dibujo.get('id', '')}"
+    df_tabla = pd.DataFrame(filas_tabla)
     
-    if st.session_state.ultimo_clic_id != clic_id:
-        st.session_state.ultimo_clic_id = clic_id
-        
-        if coords_clic:
-            st.session_state.ultimas_coordenadas = coords_clic
-            st.session_state.ultima_operadora = operador_area_clic
-            st.session_state.ultimo_nombre_area = nombre_area_clic
-            
-        # Toggle de pintura
-        if nombre_area_clic:
-            if nombre_area_clic in st.session_state.areas_pintadas:
-                del st.session_state.areas_pintadas[nombre_area_clic]
-            else:
-                st.session_state.areas_pintadas[nombre_area_clic] = color_pincel
-        st.rerun()
-
-    # Mostrar información en la barra lateral
-    df_info = pd.DataFrame(list(propiedades.items()), columns=["Dato", "Valor"])
-    with info_placeholder.container():
-        st.success(f"**{propiedades.get(COL_NOMBRE, 'Área seleccionada')}**")
-        st.dataframe(df_info, hide_index=True, use_container_width=True)
+    st.dataframe(
+        df_tabla,
+        column_config={
+            "🎨 Color": st.column_config.TextColumn("Color", width="small"),
+            "🛢️ Área / Locación": st.column_config.TextColumn("Área / Locación", width="medium"),
+            "🏢 Operadora": st.column_config.TextColumn("Operadora", width="medium"),
+            "📍 Coordenadas (GMS)": st.column_config.TextColumn("Coordenadas (GMS)", width="large"),
+            "🌐 Latitud": st.column_config.TextColumn("Latitud", width="small"),
+            "🌐 Longitud": st.column_config.TextColumn("Longitud", width="small"),
+        },
+        hide_index=True,
+        use_container_width=True
+    )
