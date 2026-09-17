@@ -1,0 +1,20 @@
+[
+  {
+    "id": "base_anelo",
+    "nombre": "Base Sullair Añelo",
+    "coords_raw": "38°20'22.0\"S 68°49'17.9\"W",
+    "lat": -38.339444,
+    "lon": -68.821639,
+    "categoria": "Base Operativa",
+    "color": "#009639"
+  },
+  {
+    "id": "base_neuquen",
+    "nombre": "Base Sullair Neuquén",
+    "coords_raw": "38°54'13.6\"S 68°05'09.7\"W",
+    "lat": -38.903778,
+    "lon": -68.086028,
+    "categoria": "Base Central",
+    "color": "#009639"
+  }
+]

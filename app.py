@@ -5,6 +5,8 @@ from streamlit_folium import st_folium
 import pandas as pd
 import numpy as np
 import re
+import json
+import os
 from shapely.geometry import Point, shape
 import requests
 import zipfile
@@ -42,10 +44,49 @@ if not st.session_state.usuario:
     st.stop()
 
 # ==============================================================================
-# CONSTANTES DE DATOS
+# CONSTANTES DE DATOS Y PERSISTENCIA
 # ==============================================================================
 COL_NOMBRE = 'nombre'
 COL_OPERADORA = 'operador'
+RUTA_PUNTOS_FIJOS = 'data/puntos_fijos.json'
+
+# Puntos fijos predeterminados (Bases Sullair)
+PUNTOS_FIJOS_DEFAULT = [
+    {
+        "id": "base_anelo",
+        "nombre": "Base Sullair Añelo",
+        "coords_raw": "38°20'22.0\"S 68°49'17.9\"W",
+        "lat": -38.339444,
+        "lon": -68.821639,
+        "categoria": "Base Operativa",
+        "color": "#009639"
+    },
+    {
+        "id": "base_neuquen",
+        "nombre": "Base Sullair Neuquén",
+        "coords_raw": "38°54'13.6\"S 68°05'09.7\"W",
+        "lat": -38.903778,
+        "lon": -68.086028,
+        "categoria": "Base Central",
+        "color": "#009639"
+    }
+]
+
+def cargar_puntos_fijos():
+    if os.path.exists(RUTA_PUNTOS_FIJOS):
+        try:
+            with open(RUTA_PUNTOS_FIJOS, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # Si no existe, creamos el archivo con los puntos default
+    try:
+        os.makedirs(os.path.dirname(RUTA_PUNTOS_FIJOS), exist_ok=True)
+        with open(RUTA_PUNTOS_FIJOS, 'w', encoding='utf-8') as f:
+            json.dump(PUNTOS_FIJOS_DEFAULT, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    return PUNTOS_FIJOS_DEFAULT
 
 # ==============================================================================
 # 1. FUNCIÓN DE ACTUALIZACIÓN DE DATOS (ADMIN)
@@ -65,13 +106,12 @@ def actualizar_datos():
         st.sidebar.error(f"Falló la descarga de datos: {e}")
 
 # ==============================================================================
-# 2. TRANSFORMACIONES DE COORDENADAS (GMS / DECIMAL)
+# 2. TRANSFORMACIONES DE COORDENADAS (ULTRA ROBUSTO)
 # ==============================================================================
 def decimal_a_gms(lat, lon):
     """
     Convierte coordenadas en grados decimales (DD) a formato Grados, Minutos y Segundos (GMS).
     Ejemplo: (-38.9516, -68.0591) -> 38°57'05.76"S, 68°03'32.76"O
-    Maneja con seguridad valores NaN, None o tipos no convertibles.
     """
     if lat is None or lon is None:
         return ""
@@ -104,11 +144,36 @@ def decimal_a_gms(lat, lon):
     except Exception:
         return ""
 
+def _validar_y_ajustar_lat_lon(lat, lon):
+    """
+    Verifica que las coordenadas sean válidas y corrige inversión accidental (Lon, Lat).
+    En Argentina / Neuquén: Latitud es ~ -36° a -41° y Longitud ~ -67° a -72°.
+    """
+    if lat is None or lon is None:
+        return None, None
+    try:
+        lat = float(lat)
+        lon = float(lon)
+        # Si el usuario colocó primero la Longitud (>50) y luego la Latitud (<50)
+        if abs(lat) > 50 and abs(lon) < 50:
+            lat, lon = lon, lat
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            return lat, lon
+    except Exception:
+        pass
+    return None, None
+
 def extraer_coordenadas(texto):
-    if not texto:
+    """
+    Parser ultra flexible de coordenadas. Tolera cualquier variación de espacios, 
+    comillas simples/dobles/tipográficas, direcciones antes/después (N/S/E/W/O) y enlaces de Google Maps.
+    """
+    if not texto or not isinstance(texto, str):
         return None, None
     
-    # Resolver links acortados de Google Maps
+    texto = texto.strip()
+    
+    # 1. Enlaces acortados de Google Maps
     if "maps.app.goo.gl" in texto or "goo.gl/maps" in texto:
         try:
             r = requests.get(texto, allow_redirects=True, timeout=5)
@@ -116,8 +181,19 @@ def extraer_coordenadas(texto):
         except Exception:
             pass
 
-    # DMS / GMS (Grados Minutos Segundos)
-    match_dms = re.search(r'(\d+)°(\d+)\'([\d\.]+)"([NSns])\s*(\d+)°(\d+)\'([\d\.]+)"([EWOewo])', texto)
+    # 2. Decimales en URLs (ej. @-38.90377,-68.08602 o ?q=-38.90377,-68.08602)
+    match_url = re.search(r'[@?&/](-?\d{1,2}\.\d+)[,/](-?\d{1,3}\.\d+)', texto)
+    if match_url:
+        lat, lon = float(match_url.group(1)), float(match_url.group(2))
+        return _validar_y_ajustar_lat_lon(lat, lon)
+
+    # Normalizar símbolos tipográficos
+    t = texto.replace('”', '"').replace('’', "'").replace('″', '"').replace('′', "'").replace('´', "'")
+    
+    # 3. DMS con dirección después (ej: 38° 54' 13.56" S, 68° 5' 9.67" W o 38°54'13.6"S 68°05'09.7"W)
+    # \d{1,3} permite grados con 1 a 3 dígitos; \d{1,2} permite minutos con 1 o 2 dígitos
+    regex_dms = r'(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*([NSns])\s*[,;/]?\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*([EWOewo])'
+    match_dms = re.search(regex_dms, t)
     if match_dms:
         lat_d, lat_m, lat_s, lat_dir, lon_d, lon_m, lon_s, lon_dir = match_dms.groups()
         lat = float(lat_d) + float(lat_m) / 60.0 + float(lat_s) / 3600.0
@@ -126,21 +202,32 @@ def extraer_coordenadas(texto):
         lon = float(lon_d) + float(lon_m) / 60.0 + float(lon_s) / 3600.0
         if lon_dir.upper() in ['W', 'O']:
             lon = -lon
-        return lat, lon
+        return _validar_y_ajustar_lat_lon(lat, lon)
 
-    # Decimales en URLs o texto suelto
-    match_link = re.search(r'[-@/](-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)', texto)
-    if match_link:
-        return float(match_link.group(1)), float(match_link.group(2))
-    
-    match_dec = re.findall(r'-?\d{1,2}\.\d+', texto)
-    if len(match_dec) >= 2:
-        return float(match_dec[0]), float(match_dec[1])
+    # 4. DMS con dirección antes (ej: S 38° 54' 13.6", W 68° 05' 09.7")
+    regex_dms_inv = r'([NSns])\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*[,;/]?\s*([EWOewo])\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]'
+    match_inv = re.search(regex_dms_inv, t)
+    if match_inv:
+        lat_dir, lat_d, lat_m, lat_s, lon_dir, lon_d, lon_m, lon_s = match_inv.groups()
+        lat = float(lat_d) + float(lat_m) / 60.0 + float(lat_s) / 3600.0
+        if lat_dir.upper() == 'S':
+            lat = -lat
+        lon = float(lon_d) + float(lon_m) / 60.0 + float(lon_s) / 3600.0
+        if lon_dir.upper() in ['W', 'O']:
+            lon = -lon
+        return _validar_y_ajustar_lat_lon(lat, lon)
+
+    # 5. Coordenadas Decimales (ej: -38.90377, -68.08602 o -38,90377 -68,08602)
+    t_dec = re.sub(r'(\d),(\d)', r'\1.\2', t)
+    floats = re.findall(r'[-+]?\d{1,3}\.\d+', t_dec)
+    if len(floats) >= 2:
+        lat, lon = float(floats[0]), float(floats[1])
+        return _validar_y_ajustar_lat_lon(lat, lon)
         
     return None, None
 
 # ==============================================================================
-# 3. CARGA Y PROCESAMIENTO DE GEODATOS (ULTRA OPTIMIZADO Y ROBUSTO)
+# 3. CARGA Y PROCESAMIENTO DE GEODATOS (ULTRA OPTIMIZADO)
 # ==============================================================================
 @st.cache_data
 def cargar_datos():
@@ -183,7 +270,6 @@ def cargar_datos():
         }
         
     # Simplificación geométrica ligera: reduce el tamaño del GeoJSON en un 80% 
-    # eliminando el lag y acelerando el renderizado de Folium instantáneamente.
     gdf_simplificado = gdf.copy()
     try:
         gdf_simplificado['geometry'] = gdf.geometry.simplify(tolerance=0.0005, preserve_topology=True)
@@ -198,6 +284,7 @@ def cargar_datos():
 
 try:
     gdf_simplificado, gdf_completo, lookup_areas, CENTRO_DEFECTO = cargar_datos()
+    puntos_fijos = cargar_puntos_fijos()
 except Exception as e:
     st.error(f"Error al cargar el mapa de áreas. Detalle: {e}")
     st.stop()
@@ -227,17 +314,14 @@ if 'map_zoom' not in st.session_state:
     st.session_state.map_zoom = 7
 
 # ==============================================================================
-# 5. INTERCEPCIÓN DE CLICS EN EL MAPA (PROCESAMIENTO EN 1 SOLO PASO)
+# 5. INTERCEPCIÓN DE CLICS EN EL MAPA (1 SOLO PASO)
 # ==============================================================================
-# Al leer el estado del widget antes de construir el mapa, actualizamos el color 
-# y el estado inmediatamente SIN requerir un st.rerun() adicional ni causar lag.
 estado_previo_mapa = st.session_state.get("mapa_folium")
 if estado_previo_mapa and estado_previo_mapa.get("last_active_drawing"):
     dibujo_activo = estado_previo_mapa["last_active_drawing"]
     props = dibujo_activo.get("properties", {})
     nombre_clic = str(props.get(COL_NOMBRE, ""))
     
-    # Identificador único del evento para no reprocesar en reruns ajenos
     firma_clic = f"{nombre_clic}_{dibujo_activo.get('id', '')}"
     
     if firma_clic != st.session_state.ultimo_dibujo_procesado:
@@ -327,17 +411,11 @@ def procesar_busqueda():
 # 7. SCAFFOLDING PARA RUTAS LOGÍSTICAS (OPENROUTESERVICE)
 # ==============================================================================
 def calcular_ruta_logistica(origen, destino, api_key=None, perfil="driving-hgv"):
-    """
-    Función modular preparada para conectarse con la API de OpenRouteService (ORS).
-    """
     if not api_key or not origen or not destino:
         return None
     return None
 
 def agregar_capa_ruta_logistica(mapa_folium, puntos_ruta, nombre="Ruta Logística", color="#FF5722", peso=5):
-    """
-    Inyecta una capa folium.PolyLine en el mapa si existen coordenadas de ruta calculadas.
-    """
     if puntos_ruta and len(puntos_ruta) >= 2:
         folium.PolyLine(
             locations=puntos_ruta,
@@ -349,7 +427,7 @@ def agregar_capa_ruta_logistica(mapa_folium, puntos_ruta, nombre="Ruta Logístic
         ).add_to(mapa_folium)
 
 # ==============================================================================
-# 8. BARRA LATERAL (FILTROS, PINCEL Y ACCIONES)
+# 8. BARRA LATERAL (FILTROS, PINCEL, BASES SULLAIR Y ACCIONES)
 # ==============================================================================
 with st.sidebar:
     try:
@@ -374,6 +452,7 @@ with st.sidebar:
 
     st.divider()
 
+    # --- PINCEL DE COLOR ---
     st.header("🎨 Pincel de Selección")
     color_pincel = st.color_picker("Color para pintar polígonos:", value="#FF5733", key="color_picker_pincel")
     num_pintadas = len(st.session_state.areas_pintadas)
@@ -385,6 +464,24 @@ with st.sidebar:
     
     st.divider()
 
+    # --- BASES FIJAS SULLAIR ---
+    st.header("🏢 Bases Sullair (Fijas)")
+    for p in puntos_fijos:
+        col_b1, col_b2 = st.columns([3, 1])
+        with col_b1:
+            st.write(f"🟢 **{p['nombre']}**")
+        with col_b2:
+            if st.button("📍 Ir", key=f"btn_ir_{p['id']}"):
+                st.session_state.map_center = [p["lat"], p["lon"]]
+                st.session_state.map_zoom = 13
+                st.session_state.ultimas_coordenadas = (p["lat"], p["lon"])
+                st.session_state.ultima_operadora = "Sullair Argentina"
+                st.session_state.ultimo_nombre_area = p["nombre"]
+                st.rerun()
+
+    st.divider()
+
+    # --- FILTROS DE ÁREAS Y OPERADORAS ---
     st.header("🔎 Filtros del Mapa")
     lista_areas = ["TODAS"] + sorted(gdf_completo[COL_NOMBRE].dropna().astype(str).unique().tolist())
     lista_operadoras = ["TODAS"] + sorted(gdf_completo[COL_OPERADORA].dropna().astype(str).unique().tolist())
@@ -394,12 +491,14 @@ with st.sidebar:
     
     st.divider()
     
+    # --- BÚSQUEDA DE COORDENADAS ---
     st.header("📍 Buscar Coordenadas")
     st.text_input("Pegá un link de Maps o coordenadas (GMS o Decimales):", key="input_coords", on_change=procesar_busqueda)
     
     st.divider()
     
-    st.header("📄 Información del Área Cliqueada")
+    # --- INFORMACIÓN DEL POLÍGONO CLIQUEADO ---
+    st.header("📄 Información del Área")
     info_placeholder = st.empty()
     if not estado_previo_mapa or not estado_previo_mapa.get("last_active_drawing"):
         info_placeholder.info("👈 Hacé clic en un polígono del mapa para ver toda su data acá.")
@@ -473,7 +572,16 @@ folium.GeoJson(
     tooltip=folium.GeoJsonTooltip(fields=[COL_NOMBRE, COL_OPERADORA])
 ).add_to(mapa)
 
-# Marcador del punto buscado
+# Marcadores de Puntos Fijos (Bases Sullair con bandera verde institucional)
+for pf in puntos_fijos:
+    folium.Marker(
+        location=[pf["lat"], pf["lon"]],
+        popup=folium.Popup(f"<b>🏢 {pf['nombre']}</b><br>📌 {pf.get('categoria', '')}<br>📍 {pf.get('coords_raw', '')}", max_width=250),
+        tooltip=f"🏢 {pf['nombre']} ({pf.get('categoria', '')})",
+        icon=folium.Icon(color="green", icon="flag", prefix="glyphicon")
+    ).add_to(mapa)
+
+# Marcador del punto buscado (si existe)
 if st.session_state.punto_buscado:
     folium.Marker(
         st.session_state.punto_buscado,
@@ -481,34 +589,38 @@ if st.session_state.punto_buscado:
         icon=folium.Icon(color="red", icon="info-sign")
     ).add_to(mapa)
 
-# Inyección de Capa de Rutas Logísticas (Scaffolding preparado)
-ruta_activa = None  # calcular_ruta_logistica(...)
+# Inyección de Capa de Rutas Logísticas (Scaffolding)
+ruta_activa = None
 if ruta_activa:
     agregar_capa_ruta_logistica(mapa, ruta_activa, nombre="Ruta de Abastecimiento")
 
 # ==============================================================================
-# 10. RENDERIZADO Y PANELES INFORMATIVOS
+# 10. RENDERIZADO, DISPLAY GMS Y BOTÓN COPIAR
 # ==============================================================================
 st.title("🗺️ Visor de Áreas Hidrocarburíferas")
 
-# --- PANEL DE COORDENADAS ACTIVAS Y OPERADORA (GMS) ---
+# --- PANEL DE COORDENADAS ACTIVAS CON BOTÓN COPIAR ---
 if st.session_state.ultimas_coordenadas:
     lat_act, lon_act = st.session_state.ultimas_coordenadas
     gms_texto = decimal_a_gms(lat_act, lon_act)
     
-    if st.session_state.ultima_operadora and st.session_state.ultima_operadora not in ["None", "nan", ""]:
-        st.success(
-            f"📍 **Coordenadas Activas (GMS):** `{gms_texto}` &nbsp;&nbsp;|&nbsp;&nbsp; "
-            f"🏢 **Operadora:** **{st.session_state.ultima_operadora}** &nbsp;&nbsp;|&nbsp;&nbsp; "
-            f"🛢️ **Área:** **{st.session_state.ultimo_nombre_area or 'No especificada'}**"
-        )
-    else:
-        st.info(
-            f"📍 **Coordenadas Activas (GMS):** `{gms_texto}` &nbsp;&nbsp;|&nbsp;&nbsp; "
-            f"ℹ️ *Punto fuera de áreas catastradas o sin operadora asignada.*"
-        )
+    col_banner, col_copy = st.columns([4, 2])
+    with col_banner:
+        if st.session_state.ultima_operadora and st.session_state.ultima_operadora not in ["None", "nan", ""]:
+            st.success(
+                f"📍 **Coordenadas Activas (GMS):** `{gms_texto}` &nbsp;|&nbsp; "
+                f"🏢 **Operadora:** **{st.session_state.ultima_operadora}** &nbsp;|&nbsp; "
+                f"🛢️ **Área:** **{st.session_state.ultimo_nombre_area or 'No especificada'}**"
+            )
+        else:
+            st.info(
+                f"📍 **Coordenadas Activas (GMS):** `{gms_texto}` &nbsp;|&nbsp; "
+                f"ℹ️ *Punto fuera de áreas catastradas o sin operadora asignada.*"
+            )
+    with col_copy:
+        st.code(gms_texto, language=None)
 else:
-    st.info("📍 **Coordenadas Activas:** Seleccioná un área en el mapa o ingresá coordenadas en el buscador lateral para ver detalles en formato GMS y su operadora.")
+    st.info("📍 **Coordenadas Activas:** Seleccioná un área en el mapa, una base Sullair o ingresá coordenadas en el buscador lateral para ver detalles y copiarlas.")
 
 # Renderizado de Folium ultra fluido con st_folium
 st_folium(
@@ -521,15 +633,14 @@ st_folium(
 )
 
 # ==============================================================================
-# 11. TABLA RESUMEN DE ÁREAS SELECCIONADAS (REQUERIMIENTO 3)
+# 11. DETALLE DE ÁREAS SELECCIONADAS (CON REDONDEL DE COLOR VISUAL)
 # ==============================================================================
 if st.session_state.areas_pintadas:
     st.markdown("---")
     col_t1, col_t2 = st.columns([3, 1])
     with col_t1:
-        st.subheader(f"📋 Inventario de Áreas Seleccionadas ({len(st.session_state.areas_pintadas)})")
+        st.subheader(f"📋 Detalle de Áreas Seleccionadas ({len(st.session_state.areas_pintadas)})")
     with col_t2:
-        # Botón para exportar datos seleccionados a CSV
         df_export = pd.DataFrame([
             {
                 "Color_Hex": data.get("color", ""),
@@ -545,40 +656,63 @@ if st.session_state.areas_pintadas:
         st.download_button(
             "📥 Descargar CSV",
             data=csv_data,
-            file_name="areas_seleccionadas_sullair.csv",
+            file_name="detalle_areas_seleccionadas.csv",
             mime="text/csv",
             use_container_width=True
         )
 
-    # Construir tabla visual
-    filas_tabla = []
+    # Construir tabla HTML con muestra circular del color (redondel pintado)
+    filas_html = []
     for nombre, data in st.session_state.areas_pintadas.items():
+        color_hex = data.get("color", "#FF5733")
+        operadora = data.get("operadora", "Sin operadora")
+        gms = data.get("gms", "")
         lat_val = data.get("lat")
         lon_val = data.get("lon")
         lat_str = f"{float(lat_val):.5f}" if (lat_val is not None and not pd.isna(lat_val)) else "-"
         lon_str = f"{float(lon_val):.5f}" if (lon_val is not None and not pd.isna(lon_val)) else "-"
         
-        filas_tabla.append({
-            "🎨 Color": data.get("color", ""),
-            "🛢️ Área / Locación": nombre,
-            "🏢 Operadora": data.get("operadora", ""),
-            "📍 Coordenadas (GMS)": data.get("gms", ""),
-            "🌐 Latitud": lat_str,
-            "🌐 Longitud": lon_str
+        # Redondel visual con el color correspondiente
+        color_badge = f'<span style="display:inline-block; width:18px; height:18px; border-radius:50%; background-color:{color_hex}; border:1.5px solid #222; vertical-align:middle; box-shadow: 0 0 3px rgba(0,0,0,0.3);" title="{color_hex}"></span>'
+        
+        filas_html.append({
+            "Color": color_badge,
+            "Área / Locación": f"<b>{nombre}</b>",
+            "Operadora": operadora,
+            "Coordenadas (GMS)": f"<code>{gms}</code>",
+            "Latitud": lat_str,
+            "Longitud": lon_str
         })
     
-    df_tabla = pd.DataFrame(filas_tabla)
+    df_html = pd.DataFrame(filas_html)
+    raw_html_table = df_html.to_html(escape=False, index=False)
     
-    st.dataframe(
-        df_tabla,
-        column_config={
-            "🎨 Color": st.column_config.TextColumn("Color", width="small"),
-            "🛢️ Área / Locación": st.column_config.TextColumn("Área / Locación", width="medium"),
-            "🏢 Operadora": st.column_config.TextColumn("Operadora", width="medium"),
-            "📍 Coordenadas (GMS)": st.column_config.TextColumn("Coordenadas (GMS)", width="large"),
-            "🌐 Latitud": st.column_config.TextColumn("Latitud", width="small"),
-            "🌐 Longitud": st.column_config.TextColumn("Longitud", width="small"),
-        },
-        hide_index=True,
-        use_container_width=True
-    )
+    styled_table = f"""
+    <div style="overflow-x: auto; border: 1px solid rgba(128, 128, 128, 0.2); border-radius: 8px; margin-top: 8px; margin-bottom: 20px;">
+        <style>
+            .tabla-detalle {{
+                width: 100%;
+                border-collapse: collapse;
+                font-family: inherit;
+                font-size: 0.95rem;
+            }}
+            .tabla-detalle th {{
+                background-color: rgba(128, 128, 128, 0.12);
+                padding: 10px 14px;
+                text-align: left;
+                border-bottom: 2px solid rgba(128, 128, 128, 0.25);
+                font-weight: 600;
+            }}
+            .tabla-detalle td {{
+                padding: 10px 14px;
+                border-bottom: 1px solid rgba(128, 128, 128, 0.15);
+                vertical-align: middle;
+            }}
+            .tabla-detalle tr:hover {{
+                background-color: rgba(128, 128, 128, 0.06);
+            }}
+        </style>
+        {raw_html_table.replace('<table border="1" class="dataframe">', '<table class="tabla-detalle">')}
+    </div>
+    """
+    st.markdown(styled_table, unsafe_allow_html=True)
