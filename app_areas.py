@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
@@ -79,7 +80,6 @@ def cargar_puntos_fijos():
                 return json.load(f)
         except Exception:
             pass
-    # Si no existe, creamos el archivo con los puntos default
     try:
         os.makedirs(os.path.dirname(RUTA_PUNTOS_FIJOS), exist_ok=True)
         with open(RUTA_PUNTOS_FIJOS, 'w', encoding='utf-8') as f:
@@ -147,14 +147,12 @@ def decimal_a_gms(lat, lon):
 def _validar_y_ajustar_lat_lon(lat, lon):
     """
     Verifica que las coordenadas sean válidas y corrige inversión accidental (Lon, Lat).
-    En Argentina / Neuquén: Latitud es ~ -36° a -41° y Longitud ~ -67° a -72°.
     """
     if lat is None or lon is None:
         return None, None
     try:
         lat = float(lat)
         lon = float(lon)
-        # Si el usuario colocó primero la Longitud (>50) y luego la Latitud (<50)
         if abs(lat) > 50 and abs(lon) < 50:
             lat, lon = lon, lat
         if -90 <= lat <= 90 and -180 <= lon <= 180:
@@ -165,15 +163,13 @@ def _validar_y_ajustar_lat_lon(lat, lon):
 
 def extraer_coordenadas(texto):
     """
-    Parser ultra flexible de coordenadas. Tolera cualquier variación de espacios, 
-    comillas simples/dobles/tipográficas, direcciones antes/después (N/S/E/W/O) y enlaces de Google Maps.
+    Parser flexible de coordenadas para cualquier formato de DMS, Decimal o Maps.
     """
     if not texto or not isinstance(texto, str):
         return None, None
     
     texto = texto.strip()
     
-    # 1. Enlaces acortados de Google Maps
     if "maps.app.goo.gl" in texto or "goo.gl/maps" in texto:
         try:
             r = requests.get(texto, allow_redirects=True, timeout=5)
@@ -181,17 +177,13 @@ def extraer_coordenadas(texto):
         except Exception:
             pass
 
-    # 2. Decimales en URLs (ej. @-38.90377,-68.08602 o ?q=-38.90377,-68.08602)
     match_url = re.search(r'[@?&/](-?\d{1,2}\.\d+)[,/](-?\d{1,3}\.\d+)', texto)
     if match_url:
         lat, lon = float(match_url.group(1)), float(match_url.group(2))
         return _validar_y_ajustar_lat_lon(lat, lon)
 
-    # Normalizar símbolos tipográficos
     t = texto.replace('”', '"').replace('’', "'").replace('″', '"').replace('′', "'").replace('´', "'")
     
-    # 3. DMS con dirección después (ej: 38° 54' 13.56" S, 68° 5' 9.67" W o 38°54'13.6"S 68°05'09.7"W)
-    # \d{1,3} permite grados con 1 a 3 dígitos; \d{1,2} permite minutos con 1 o 2 dígitos
     regex_dms = r'(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*([NSns])\s*[,;/]?\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*([EWOewo])'
     match_dms = re.search(regex_dms, t)
     if match_dms:
@@ -204,7 +196,6 @@ def extraer_coordenadas(texto):
             lon = -lon
         return _validar_y_ajustar_lat_lon(lat, lon)
 
-    # 4. DMS con dirección antes (ej: S 38° 54' 13.6", W 68° 05' 09.7")
     regex_dms_inv = r'([NSns])\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*[,;/]?\s*([EWOewo])\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]'
     match_inv = re.search(regex_dms_inv, t)
     if match_inv:
@@ -217,7 +208,6 @@ def extraer_coordenadas(texto):
             lon = -lon
         return _validar_y_ajustar_lat_lon(lat, lon)
 
-    # 5. Coordenadas Decimales (ej: -38.90377, -68.08602 o -38,90377 -68,08602)
     t_dec = re.sub(r'(\d),(\d)', r'\1.\2', t)
     floats = re.findall(r'[-+]?\d{1,3}\.\d+', t_dec)
     if len(floats) >= 2:
@@ -235,7 +225,6 @@ def cargar_datos():
     gdf = gpd.read_file(ruta_archivo)
     gdf = gdf.to_crs(epsg=4326)
     
-    # Limpieza de geometrías nulas o vacías
     gdf = gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty].copy()
     try:
         gdf['geometry'] = gdf['geometry'].make_valid()
@@ -246,7 +235,6 @@ def cargar_datos():
         if pd.api.types.is_datetime64_any_dtype(gdf[col]):
             gdf[col] = gdf[col].astype(str)
             
-    # Precalcular centroides geodésicamente precisos
     try:
         centroids_4326 = gdf.to_crs(epsg=3857).geometry.centroid.to_crs(epsg=4326)
         gdf['lat_centro'] = centroids_4326.y
@@ -269,14 +257,12 @@ def cargar_datos():
             'gms': decimal_a_gms(lat, lon) if (lat is not None and lon is not None) else ""
         }
         
-    # Simplificación geométrica ligera: reduce el tamaño del GeoJSON en un 80% 
     gdf_simplificado = gdf.copy()
     try:
         gdf_simplificado['geometry'] = gdf.geometry.simplify(tolerance=0.0005, preserve_topology=True)
     except Exception:
         pass
     
-    # Calcular centro y límites iniciales de la provincia
     minx, miny, maxx, maxy = gdf.total_bounds
     centro_inicial = [float((miny + maxy) / 2.0), float((minx + maxx) / 2.0)]
     
@@ -327,7 +313,6 @@ if estado_previo_mapa and estado_previo_mapa.get("last_active_drawing"):
     if firma_clic != st.session_state.ultimo_dibujo_procesado:
         st.session_state.ultimo_dibujo_procesado = firma_clic
         
-        # Obtener metadatos y coordenadas del área cliqueada
         meta = lookup_areas.get(nombre_clic)
         if meta:
             operador_clic = meta['operador']
@@ -343,13 +328,11 @@ if estado_previo_mapa and estado_previo_mapa.get("last_active_drawing"):
                 lat_clic, lon_clic, gms_clic = None, None, ""
             operador_clic = str(props.get(COL_OPERADORA, "Sin operadora"))
             
-        # Actualizar display superior
         if lat_clic is not None and lon_clic is not None:
             st.session_state.ultimas_coordenadas = (lat_clic, lon_clic)
             st.session_state.ultima_operadora = operador_clic
             st.session_state.ultimo_nombre_area = nombre_clic
 
-        # Toggle de selección de colores (Pintar / Despintar)
         color_actual = st.session_state.get("color_picker_pincel", "#FF5733")
         if nombre_clic:
             if nombre_clic in st.session_state.areas_pintadas:
@@ -531,7 +514,6 @@ def estilo_iluminado(feature):
     nombre_area = str(props.get(COL_NOMBRE, ''))
     empresa = str(props.get(COL_OPERADORA, ''))
     
-    # 1. Prioridad: Áreas pintadas con selección múltiple
     if nombre_area in st.session_state.areas_pintadas:
         info_pintada = st.session_state.areas_pintadas[nombre_area]
         color_guardado = info_pintada["color"] if isinstance(info_pintada, dict) else info_pintada
@@ -542,7 +524,6 @@ def estilo_iluminado(feature):
             'fillOpacity': 0.8
         }
     
-    # 2. Filtros interactivos por selectbox
     iluminar = False
     if st.session_state.area_elegida != "TODAS" and nombre_area == st.session_state.area_elegida:
         iluminar = True
@@ -556,7 +537,6 @@ def estilo_iluminado(feature):
     else:
         return {'fillColor': '#cccccc', 'color': 'gray', 'weight': 1, 'fillOpacity': 0.1}
 
-# Construcción de mapa con centro y zoom estables
 mapa = folium.Map(
     location=st.session_state.map_center,
     zoom_start=st.session_state.map_zoom,
@@ -564,7 +544,6 @@ mapa = folium.Map(
     attr='Esri'
 )
 
-# Capa GeoJSON ultra liviana (simplificada)
 folium.GeoJson(
     gdf_simplificado,
     name='Áreas',
@@ -572,7 +551,6 @@ folium.GeoJson(
     tooltip=folium.GeoJsonTooltip(fields=[COL_NOMBRE, COL_OPERADORA])
 ).add_to(mapa)
 
-# Marcadores de Puntos Fijos (Bases Sullair con bandera verde institucional)
 for pf in puntos_fijos:
     folium.Marker(
         location=[pf["lat"], pf["lon"]],
@@ -581,7 +559,6 @@ for pf in puntos_fijos:
         icon=folium.Icon(color="green", icon="flag", prefix="glyphicon")
     ).add_to(mapa)
 
-# Marcador del punto buscado (si existe)
 if st.session_state.punto_buscado:
     folium.Marker(
         st.session_state.punto_buscado,
@@ -589,36 +566,68 @@ if st.session_state.punto_buscado:
         icon=folium.Icon(color="red", icon="info-sign")
     ).add_to(mapa)
 
-# Inyección de Capa de Rutas Logísticas (Scaffolding)
 ruta_activa = None
 if ruta_activa:
     agregar_capa_ruta_logistica(mapa, ruta_activa, nombre="Ruta de Abastecimiento")
 
 # ==============================================================================
-# 10. RENDERIZADO, DISPLAY GMS Y BOTÓN COPIAR
+# 10. RENDERIZADO, DISPLAY GMS UNIFICADO Y MAPA
 # ==============================================================================
 st.title("🗺️ Visor de Áreas Hidrocarburíferas")
 
-# --- PANEL DE COORDENADAS ACTIVAS CON BOTÓN COPIAR ---
+# --- PANEL DE COORDENADAS ACTIVAS UNIFICADO CON BOTÓN INTEGRADO ---
 if st.session_state.ultimas_coordenadas:
     lat_act, lon_act = st.session_state.ultimas_coordenadas
     gms_texto = decimal_a_gms(lat_act, lon_act)
+    op = st.session_state.ultima_operadora or "Sin operadora"
+    area = st.session_state.ultimo_nombre_area or "No especificada"
+    tiene_op = bool(st.session_state.ultima_operadora and st.session_state.ultima_operadora not in ["None", "nan", ""])
     
-    col_banner, col_copy = st.columns([4, 2])
-    with col_banner:
-        if st.session_state.ultima_operadora and st.session_state.ultima_operadora not in ["None", "nan", ""]:
-            st.success(
-                f"📍 **Coordenadas Activas (GMS):** `{gms_texto}` &nbsp;|&nbsp; "
-                f"🏢 **Operadora:** **{st.session_state.ultima_operadora}** &nbsp;|&nbsp; "
-                f"🛢️ **Área:** **{st.session_state.ultimo_nombre_area or 'No especificada'}**"
-            )
-        else:
-            st.info(
-                f"📍 **Coordenadas Activas (GMS):** `{gms_texto}` &nbsp;|&nbsp; "
-                f"ℹ️ *Punto fuera de áreas catastradas o sin operadora asignada.*"
-            )
-    with col_copy:
-        st.code(gms_texto, language=None)
+    bg_color = "#e8f5e9" if tiene_op else "#e1f5fe"
+    text_color = "#1b5e20" if tiene_op else "#01579b"
+    border_color = "#c8e6c9" if tiene_op else "#b3e5fc"
+    btn_color = "#009639" if tiene_op else "#0288d1"
+    
+    info_detalle = f"&nbsp;|&nbsp; 🏢 <b>Operadora:</b> <b>{op}</b> &nbsp;|&nbsp; 🛢️ <b>Área:</b> <b>{area}</b>" if tiene_op else "&nbsp;|&nbsp; ℹ️ <i>Punto fuera de áreas catastradas</i>"
+    
+    banner_html = f"""
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: {bg_color}; color: {text_color}; padding: 9px 16px; border-radius: 8px; border: 1px solid {border_color}; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0px;">
+        <div style="font-size: 14px; line-height: 1.4; display: flex; align-items: center; flex-wrap: wrap; gap: 6px;">
+            <span>📍 <b>Coordenadas Activas (GMS):</b></span>
+            <code style="background: rgba(0,0,0,0.06); padding: 2px 7px; border-radius: 4px; font-weight: 600; font-size: 13.5px;">{gms_texto}</code>
+            <span>{info_detalle}</span>
+        </div>
+        <button id="btnCopy" onclick="copyCoords()" style="background-color: {btn_color}; color: white; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; transition: 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.12); margin-left: 12px;">
+            📋 Copiar
+        </button>
+    </div>
+    <script>
+    function copyCoords() {{
+        const text = "{gms_texto}";
+        if (navigator.clipboard && window.isSecureContext) {{
+            navigator.clipboard.writeText(text).then(showSuccess);
+        }} else {{
+            const input = document.createElement('textarea');
+            input.value = text;
+            document.body.appendChild(input);
+            input.select();
+            document.execCommand('copy');
+            document.body.removeChild(input);
+            showSuccess();
+        }}
+    }}
+    function showSuccess() {{
+        const btn = document.getElementById('btnCopy');
+        btn.innerText = '✅ ¡Copiado!';
+        btn.style.backgroundColor = '#1b5e20';
+        setTimeout(() => {{
+            btn.innerText = '📋 Copiar';
+            btn.style.backgroundColor = '{btn_color}';
+        }}, 2000);
+    }}
+    </script>
+    """
+    components.html(banner_html, height=52)
 else:
     st.info("📍 **Coordenadas Activas:** Seleccioná un área en el mapa, una base Sullair o ingresá coordenadas en el buscador lateral para ver detalles y copiarlas.")
 
@@ -661,7 +670,6 @@ if st.session_state.areas_pintadas:
             use_container_width=True
         )
 
-    # Construir tabla HTML con muestra circular del color (redondel pintado)
     filas_html = []
     for nombre, data in st.session_state.areas_pintadas.items():
         color_hex = data.get("color", "#FF5733")
@@ -672,7 +680,6 @@ if st.session_state.areas_pintadas:
         lat_str = f"{float(lat_val):.5f}" if (lat_val is not None and not pd.isna(lat_val)) else "-"
         lon_str = f"{float(lon_val):.5f}" if (lon_val is not None and not pd.isna(lon_val)) else "-"
         
-        # Redondel visual con el color correspondiente
         color_badge = f'<span style="display:inline-block; width:18px; height:18px; border-radius:50%; background-color:{color_hex}; border:1.5px solid #222; vertical-align:middle; box-shadow: 0 0 3px rgba(0,0,0,0.3);" title="{color_hex}"></span>'
         
         filas_html.append({
