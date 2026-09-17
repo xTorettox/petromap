@@ -8,6 +8,7 @@ import numpy as np
 import re
 import json
 import os
+import html
 from shapely.geometry import Point, shape
 import requests
 import zipfile
@@ -487,7 +488,6 @@ with st.sidebar:
         info_placeholder.info("👈 Hacé clic en un polígono del mapa para ver toda su data acá.")
     else:
         props_clicked = estado_previo_mapa["last_active_drawing"].get("properties", {})
-        # Convertir todos los valores a string para compatibilidad 100% con PyArrow
         items_str = [(str(k), str(v) if v is not None else "") for k, v in props_clicked.items()]
         df_props = pd.DataFrame(items_str, columns=["Dato", "Valor"])
         with info_placeholder.container():
@@ -592,60 +592,140 @@ if st.session_state.ultimas_coordenadas:
     
     info_detalle = f"&nbsp;|&nbsp; 🏢 <b>Operadora:</b> <b>{op}</b> &nbsp;|&nbsp; 🛢️ <b>Área:</b> <b>{area}</b>" if tiene_op else "&nbsp;|&nbsp; ℹ️ <i>Punto fuera de áreas catastradas</i>"
     
+    # Serialización JSON segura para evitar errores de sintaxis con comillas dobles/simples en JavaScript
+    gms_json = json.dumps(gms_texto)
+    gms_attr = html.escape(gms_texto)
+    
     banner_html = f"""
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: {bg_color}; color: {text_color}; padding: 9px 16px; border-radius: 8px; border: 1px solid {border_color}; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0px; box-sizing: border-box;">
-        <div style="font-size: 14px; line-height: 1.4; display: flex; align-items: center; flex-wrap: wrap; gap: 6px;">
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: transparent;
+            overflow: hidden;
+        }}
+        .banner {{
+            background-color: {bg_color};
+            color: {text_color};
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid {border_color};
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-sizing: border-box;
+            height: 44px;
+        }}
+        .info-text {{
+            font-size: 14px;
+            line-height: 1.4;
+            display: flex;
+            align-items: center;
+            flex-wrap: nowrap;
+            gap: 6px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        .coords-code {{
+            background: rgba(0,0,0,0.07);
+            padding: 2px 7px;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 13.5px;
+            font-family: monospace;
+        }}
+        .btn-copy {{
+            background-color: {btn_color};
+            color: white;
+            border: none;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            white-space: nowrap;
+            transition: all 0.2s ease;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+            margin-left: 12px;
+            outline: none;
+            flex-shrink: 0;
+        }}
+        .btn-copy:hover {{
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }}
+        .btn-copy:active {{
+            transform: translateY(0);
+        }}
+    </style>
+    </head>
+    <body>
+    <div class="banner">
+        <div class="info-text">
             <span>📍 <b>Coordenadas Activas (GMS):</b></span>
-            <code style="background: rgba(0,0,0,0.06); padding: 2px 7px; border-radius: 4px; font-weight: 600; font-size: 13.5px;">{gms_texto}</code>
+            <span class="coords-code">{gms_texto}</span>
             <span>{info_detalle}</span>
         </div>
-        <button id="btnCopy" onclick="copyCoords()" style="background-color: {btn_color}; color: white; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; transition: 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.12); margin-left: 12px; outline: none;">
+        <button id="btnCopy" class="btn-copy" type="button" data-coords="{gms_attr}">
             📋 Copiar
         </button>
     </div>
     <script>
-    function copyCoords() {{
-        const text = "{gms_texto}";
-        let success = false;
-        
-        // Método 1: Textarea con foco explícito (compatible 100% con iframes)
-        try {{
-            const textarea = document.createElement("textarea");
-            textarea.value = text;
-            textarea.setAttribute("readonly", "");
-            textarea.style.position = "fixed";
-            textarea.style.left = "0";
-            textarea.style.top = "0";
-            textarea.style.opacity = "0";
-            document.body.appendChild(textarea);
-            textarea.focus();
-            textarea.select();
-            textarea.setSelectionRange(0, textarea.value.length);
-            success = document.execCommand("copy");
-            document.body.removeChild(textarea);
-        }} catch (e) {{
-            success = false;
-        }}
-        
-        // Método 2: Clipboard API moderna (si está disponible y permitida)
-        if (!success && navigator.clipboard) {{
-            navigator.clipboard.writeText(text).then(showSuccess).catch(() => {{}});
-        }} else if (success) {{
-            showSuccess();
-        }}
-    }}
-    function showSuccess() {{
+    (function() {{
+        const textToCopy = {gms_json};
         const btn = document.getElementById('btnCopy');
-        btn.innerText = '✅ ¡Copiado!';
-        btn.style.backgroundColor = '#1b5e20';
-        setTimeout(() => {{
-            btn.innerText = '📋 Copiar';
-            btn.style.backgroundColor = '{btn_color}';
-        }}, 2000);
-    }}
+
+        btn.addEventListener('click', function() {{
+            let copied = false;
+            
+            // Método 1: Textarea con foco explícito (compatible con iframes)
+            try {{
+                const textarea = document.createElement('textarea');
+                textarea.value = textToCopy;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'absolute';
+                textarea.style.left = '-9999px';
+                textarea.style.top = '0';
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                textarea.setSelectionRange(0, 99999);
+                copied = document.execCommand('copy');
+                document.body.removeChild(textarea);
+            }} catch (err) {{
+                copied = false;
+            }}
+
+            // Método 2: Clipboard API si está habilitada
+            if (!copied && navigator.clipboard && window.isSecureContext) {{
+                navigator.clipboard.writeText(textToCopy).then(showSuccess).catch(function(e) {{
+                    console.error("Error al copiar:", e);
+                }});
+            }} else if (copied) {{
+                showSuccess();
+            }}
+        }});
+
+        function showSuccess() {{
+            btn.innerText = '✅ ¡Copiado!';
+            btn.style.backgroundColor = '#1b5e20';
+            setTimeout(function() {{
+                btn.innerText = '📋 Copiar';
+                btn.style.backgroundColor = '{btn_color}';
+            }}, 2000);
+        }}
+    }})();
     </script>
+    </body>
+    </html>
     """
-    components.html(banner_html, height=52)
+    components.html(banner_html, height=48)
 else:
     st.info("📍 **Coordenadas Activas:** Seleccioná un área en el mapa, una base Sullair o ingresá coordenadas en el buscador lateral para ver detalles y copiarlas.")
 
