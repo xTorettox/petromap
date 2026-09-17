@@ -3,6 +3,7 @@ import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
 import pandas as pd
+import numpy as np
 import re
 from shapely.geometry import Point, shape
 import requests
@@ -70,29 +71,38 @@ def decimal_a_gms(lat, lon):
     """
     Convierte coordenadas en grados decimales (DD) a formato Grados, Minutos y Segundos (GMS).
     Ejemplo: (-38.9516, -68.0591) -> 38°57'05.76"S, 68°03'32.76"O
+    Maneja con seguridad valores NaN, None o tipos no convertibles.
     """
     if lat is None or lon is None:
         return ""
-    
-    # Latitud
-    lat_dir = "S" if lat < 0 else "N"
-    abs_lat = abs(lat)
-    lat_deg = int(abs_lat)
-    lat_min_float = (abs_lat - lat_deg) * 60
-    lat_min = int(lat_min_float)
-    lat_sec = (lat_min_float - lat_min) * 60
-    lat_gms = f"{lat_deg:02d}°{lat_min:02d}'{lat_sec:05.2f}\"{lat_dir}"
-    
-    # Longitud
-    lon_dir = "O" if lon < 0 else "E"
-    abs_lon = abs(lon)
-    lon_deg = int(abs_lon)
-    lon_min_float = (abs_lon - lon_deg) * 60
-    lon_min = int(lon_min_float)
-    lon_sec = (lon_min_float - lon_min) * 60
-    lon_gms = f"{lon_deg:02d}°{lon_min:02d}'{lon_sec:05.2f}\"{lon_dir}"
-    
-    return f"{lat_gms}, {lon_gms}"
+    try:
+        if pd.isna(lat) or pd.isna(lon) or np.isnan(lat) or np.isnan(lon):
+            return ""
+            
+        lat_f = float(lat)
+        lon_f = float(lon)
+        
+        # Latitud
+        lat_dir = "S" if lat_f < 0 else "N"
+        abs_lat = abs(lat_f)
+        lat_deg = int(abs_lat)
+        lat_min_float = (abs_lat - lat_deg) * 60.0
+        lat_min = int(lat_min_float)
+        lat_sec = (lat_min_float - lat_min) * 60.0
+        lat_gms = f"{lat_deg:02d}°{lat_min:02d}'{lat_sec:05.2f}\"{lat_dir}"
+        
+        # Longitud
+        lon_dir = "O" if lon_f < 0 else "E"
+        abs_lon = abs(lon_f)
+        lon_deg = int(abs_lon)
+        lon_min_float = (abs_lon - lon_deg) * 60.0
+        lon_min = int(lon_min_float)
+        lon_sec = (lon_min_float - lon_min) * 60.0
+        lon_gms = f"{lon_deg:02d}°{lon_min:02d}'{lon_sec:05.2f}\"{lon_dir}"
+        
+        return f"{lat_gms}, {lon_gms}"
+    except Exception:
+        return ""
 
 def extraer_coordenadas(texto):
     if not texto:
@@ -130,7 +140,7 @@ def extraer_coordenadas(texto):
     return None, None
 
 # ==============================================================================
-# 3. CARGA Y PROCESAMIENTO DE GEODATOS (ULTRA OPTIMIZADO)
+# 3. CARGA Y PROCESAMIENTO DE GEODATOS (ULTRA OPTIMIZADO Y ROBUSTO)
 # ==============================================================================
 @st.cache_data
 def cargar_datos():
@@ -138,36 +148,51 @@ def cargar_datos():
     gdf = gpd.read_file(ruta_archivo)
     gdf = gdf.to_crs(epsg=4326)
     
+    # Limpieza de geometrías nulas o vacías
+    gdf = gdf[gdf.geometry.notnull() & ~gdf.geometry.is_empty].copy()
+    try:
+        gdf['geometry'] = gdf['geometry'].make_valid()
+    except Exception:
+        pass
+    
     for col in gdf.columns:
         if pd.api.types.is_datetime64_any_dtype(gdf[col]):
             gdf[col] = gdf[col].astype(str)
             
-    # Precalcular centroides y diccionario de lookup rápido O(1)
-    centroids = gdf.geometry.centroid
-    gdf['lat_centro'] = centroids.y
-    gdf['lon_centro'] = centroids.x
+    # Precalcular centroides geodésicamente precisos
+    try:
+        centroids_4326 = gdf.to_crs(epsg=3857).geometry.centroid.to_crs(epsg=4326)
+        gdf['lat_centro'] = centroids_4326.y
+        gdf['lon_centro'] = centroids_4326.x
+    except Exception:
+        centroids = gdf.geometry.centroid
+        gdf['lat_centro'] = centroids.y
+        gdf['lon_centro'] = centroids.x
     
     lookup_areas = {}
     for _, row in gdf.iterrows():
         nombre = str(row[COL_NOMBRE])
         operador = str(row[COL_OPERADORA]) if pd.notna(row[COL_OPERADORA]) else "Sin operadora"
-        lat = row['lat_centro']
-        lon = row['lon_centro']
+        lat = row['lat_centro'] if pd.notna(row['lat_centro']) else None
+        lon = row['lon_centro'] if pd.notna(row['lon_centro']) else None
         lookup_areas[nombre] = {
             'operador': operador,
-            'lat': lat,
-            'lon': lon,
-            'gms': decimal_a_gms(lat, lon)
+            'lat': float(lat) if lat is not None else None,
+            'lon': float(lon) if lon is not None else None,
+            'gms': decimal_a_gms(lat, lon) if (lat is not None and lon is not None) else ""
         }
         
     # Simplificación geométrica ligera: reduce el tamaño del GeoJSON en un 80% 
     # eliminando el lag y acelerando el renderizado de Folium instantáneamente.
     gdf_simplificado = gdf.copy()
-    gdf_simplificado['geometry'] = gdf.geometry.simplify(tolerance=0.0005, preserve_topology=True)
+    try:
+        gdf_simplificado['geometry'] = gdf.geometry.simplify(tolerance=0.0005, preserve_topology=True)
+    except Exception:
+        pass
     
     # Calcular centro y límites iniciales de la provincia
     minx, miny, maxx, maxy = gdf.total_bounds
-    centro_inicial = [(miny + maxy) / 2.0, (minx + maxx) / 2.0]
+    centro_inicial = [float((miny + maxy) / 2.0), float((minx + maxx) / 2.0)]
     
     return gdf_simplificado, gdf, lookup_areas, centro_inicial
 
@@ -228,7 +253,7 @@ if estado_previo_mapa and estado_previo_mapa.get("last_active_drawing"):
             try:
                 geom = shape(dibujo_activo.get("geometry", {}))
                 c = geom.centroid
-                lat_clic, lon_clic = c.y, c.x
+                lat_clic, lon_clic = float(c.y), float(c.x)
                 gms_clic = decimal_a_gms(lat_clic, lon_clic)
             except Exception:
                 lat_clic, lon_clic, gms_clic = None, None, ""
@@ -262,9 +287,10 @@ def on_area_change():
     area_sel = st.session_state.area_elegida
     if area_sel != "TODAS" and area_sel in lookup_areas:
         info = lookup_areas[area_sel]
-        st.session_state.map_center = [info['lat'], info['lon']]
-        st.session_state.map_zoom = 10
-        st.session_state.ultimas_coordenadas = (info['lat'], info['lon'])
+        if info['lat'] is not None and info['lon'] is not None:
+            st.session_state.map_center = [info['lat'], info['lon']]
+            st.session_state.map_zoom = 10
+            st.session_state.ultimas_coordenadas = (info['lat'], info['lon'])
         st.session_state.ultima_operadora = info['operador']
         st.session_state.ultimo_nombre_area = area_sel
 
@@ -506,12 +532,12 @@ if st.session_state.areas_pintadas:
         # Botón para exportar datos seleccionados a CSV
         df_export = pd.DataFrame([
             {
-                "Color_Hex": data["color"],
+                "Color_Hex": data.get("color", ""),
                 "Area": nombre,
-                "Operadora": data["operadora"],
-                "Coordenadas_GMS": data["gms"],
-                "Latitud": data["lat"],
-                "Longitud": data["lon"]
+                "Operadora": data.get("operadora", ""),
+                "Coordenadas_GMS": data.get("gms", ""),
+                "Latitud": data.get("lat"),
+                "Longitud": data.get("lon")
             }
             for nombre, data in st.session_state.areas_pintadas.items()
         ])
@@ -527,13 +553,18 @@ if st.session_state.areas_pintadas:
     # Construir tabla visual
     filas_tabla = []
     for nombre, data in st.session_state.areas_pintadas.items():
+        lat_val = data.get("lat")
+        lon_val = data.get("lon")
+        lat_str = f"{float(lat_val):.5f}" if (lat_val is not None and not pd.isna(lat_val)) else "-"
+        lon_str = f"{float(lon_val):.5f}" if (lon_val is not None and not pd.isna(lon_val)) else "-"
+        
         filas_tabla.append({
-            "🎨 Color": data["color"],
+            "🎨 Color": data.get("color", ""),
             "🛢️ Área / Locación": nombre,
-            "🏢 Operadora": data["operadora"],
-            "📍 Coordenadas (GMS)": data["gms"],
-            "🌐 Latitud": f"{data['lat']:.5f}" if data['lat'] is not None else "-",
-            "🌐 Longitud": f"{data['lon']:.5f}" if data['lon'] is not None else "-"
+            "🏢 Operadora": data.get("operadora", ""),
+            "📍 Coordenadas (GMS)": data.get("gms", ""),
+            "🌐 Latitud": lat_str,
+            "🌐 Longitud": lon_str
         })
     
     df_tabla = pd.DataFrame(filas_tabla)
