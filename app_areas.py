@@ -487,7 +487,9 @@ with st.sidebar:
         info_placeholder.info("👈 Hacé clic en un polígono del mapa para ver toda su data acá.")
     else:
         props_clicked = estado_previo_mapa["last_active_drawing"].get("properties", {})
-        df_props = pd.DataFrame(list(props_clicked.items()), columns=["Dato", "Valor"])
+        # Convertir todos los valores a string para compatibilidad 100% con PyArrow
+        items_str = [(str(k), str(v) if v is not None else "") for k, v in props_clicked.items()]
+        df_props = pd.DataFrame(items_str, columns=["Dato", "Valor"])
         with info_placeholder.container():
             st.success(f"**{props_clicked.get(COL_NOMBRE, 'Área seleccionada')}**")
             st.dataframe(df_props, hide_index=True, use_container_width=True)
@@ -575,7 +577,7 @@ if ruta_activa:
 # ==============================================================================
 st.title("🗺️ Visor de Áreas Hidrocarburíferas")
 
-# --- PANEL DE COORDENADAS ACTIVAS UNIFICADO CON BOTÓN INTEGRADO ---
+# --- PANEL DE COORDENADAS ACTIVAS UNIFICADO (1 SOLO CUADRO CON BOTÓN COPIAR INTEGRADO) ---
 if st.session_state.ultimas_coordenadas:
     lat_act, lon_act = st.session_state.ultimas_coordenadas
     gms_texto = decimal_a_gms(lat_act, lon_act)
@@ -591,28 +593,44 @@ if st.session_state.ultimas_coordenadas:
     info_detalle = f"&nbsp;|&nbsp; 🏢 <b>Operadora:</b> <b>{op}</b> &nbsp;|&nbsp; 🛢️ <b>Área:</b> <b>{area}</b>" if tiene_op else "&nbsp;|&nbsp; ℹ️ <i>Punto fuera de áreas catastradas</i>"
     
     banner_html = f"""
-    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: {bg_color}; color: {text_color}; padding: 9px 16px; border-radius: 8px; border: 1px solid {border_color}; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0px;">
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: {bg_color}; color: {text_color}; padding: 9px 16px; border-radius: 8px; border: 1px solid {border_color}; display: flex; align-items: center; justify-content: space-between; margin-bottom: 0px; box-sizing: border-box;">
         <div style="font-size: 14px; line-height: 1.4; display: flex; align-items: center; flex-wrap: wrap; gap: 6px;">
             <span>📍 <b>Coordenadas Activas (GMS):</b></span>
             <code style="background: rgba(0,0,0,0.06); padding: 2px 7px; border-radius: 4px; font-weight: 600; font-size: 13.5px;">{gms_texto}</code>
             <span>{info_detalle}</span>
         </div>
-        <button id="btnCopy" onclick="copyCoords()" style="background-color: {btn_color}; color: white; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; transition: 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.12); margin-left: 12px;">
+        <button id="btnCopy" onclick="copyCoords()" style="background-color: {btn_color}; color: white; border: none; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; white-space: nowrap; transition: 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.12); margin-left: 12px; outline: none;">
             📋 Copiar
         </button>
     </div>
     <script>
     function copyCoords() {{
         const text = "{gms_texto}";
-        if (navigator.clipboard && window.isSecureContext) {{
-            navigator.clipboard.writeText(text).then(showSuccess);
-        }} else {{
-            const input = document.createElement('textarea');
-            input.value = text;
-            document.body.appendChild(input);
-            input.select();
-            document.execCommand('copy');
-            document.body.removeChild(input);
+        let success = false;
+        
+        // Método 1: Textarea con foco explícito (compatible 100% con iframes)
+        try {{
+            const textarea = document.createElement("textarea");
+            textarea.value = text;
+            textarea.setAttribute("readonly", "");
+            textarea.style.position = "fixed";
+            textarea.style.left = "0";
+            textarea.style.top = "0";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            textarea.setSelectionRange(0, textarea.value.length);
+            success = document.execCommand("copy");
+            document.body.removeChild(textarea);
+        }} catch (e) {{
+            success = false;
+        }}
+        
+        // Método 2: Clipboard API moderna (si está disponible y permitida)
+        if (!success && navigator.clipboard) {{
+            navigator.clipboard.writeText(text).then(showSuccess).catch(() => {{}});
+        }} else if (success) {{
             showSuccess();
         }}
     }}
