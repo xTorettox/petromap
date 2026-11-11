@@ -1,10 +1,12 @@
 <?php
 /**
- * SullApps Wrapper - PetroMaps (Visor GIS de Concesiones & Áreas Hidrocarburíferas)
+ * SullApps Wrapper - PetroMaps (Visor GIS / Áreas Hidrocarburíferas Vaca Muerta)
  */
+require_once __DIR__ . '/../../auth.php';
 $currentAppName = 'PetroMaps';
 $currentAppSlug = 'petromaps';
-$defaultSubdomain = 'petromaps-sullair';
+$defaultSubdomain = 'petromap';
+requireAppAccess($currentAppSlug);
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -19,7 +21,7 @@ $defaultSubdomain = 'petromaps-sullair';
 <body class="sullapps-wrapper-body">
     <?php
     include __DIR__ . '/../../shared/topbar.php';
-    $embedUrl = resolveSullAppEmbedUrl($currentAppSlug, $defaultSubdomain, ['petromaps', 'areas', 'mapa', 'vaca muerta', 'hidrocarburiferas']);
+    $embedUrl = resolveSullAppEmbedUrl($currentAppSlug, $defaultSubdomain, ['petromaps', 'petromap', 'áreas', 'areas', 'mapa', 'vaca muerta']);
     ?>
     <div class="sullapps-iframe-container">
         <iframe
@@ -28,11 +30,10 @@ $defaultSubdomain = 'petromaps-sullair';
             width="100%"
             height="calc(100vh - 48px)"
             frameborder="0"
-            allow="clipboard-write; geolocation"
+            allow="clipboard-write"
             title="PetroMaps - Sullair Argentina"
             loading="eager">
         </iframe>
     </div>
 </body>
 </html>
-

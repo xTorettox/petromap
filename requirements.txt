@@ -4,3 +4,7 @@ folium
 streamlit-folium
 pandas
 shapely
+matplotlib
+reportlab
+requests
+Pillow

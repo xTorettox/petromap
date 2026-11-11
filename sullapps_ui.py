@@ -3,12 +3,16 @@ SullApps Suite - Shared Python UI Helper Module
 Sullair Argentina S.A.
 
 Provides standardized enterprise styling, contextual loading spinners powered by
-`shared/quotes/loading_quotes.json`, and celebration notifications across all SullApps.
+`shared/quotes/loading_quotes.json`, celebration notifications, and unified
+Single Sign-On (SSO) verification across all SullApps.
 """
 
 import os
 import json
 import html
+import hmac
+import hashlib
+import time
 import random
 from contextlib import contextmanager
 import streamlit as st
@@ -19,6 +23,8 @@ SULLAIR_LIGHT = "#E6F4EA"
 SULLAIR_BG = "#F8F9FA"
 SULLAIR_CARD = "#FFFFFF"
 SULLAIR_TEXT = "#1F2937"
+
+DEFAULT_SSO_SECRET = "SullApps_Enterprise_SSO_Secret_Key_2026_FedeCendra"
 
 DEFAULT_QUOTES = {
     "general": [
@@ -51,6 +57,133 @@ def _resolve_quotes_paths() -> list[str]:
         os.path.normpath(os.path.join(cwd, "..", "..", "shared", "quotes", "loading_quotes.json")),
         os.path.normpath(os.path.join(here, "loading_quotes.json")),
     ]
+
+
+def _resolve_users_access_paths() -> list[str]:
+    """Return candidate paths for shared/users_access.json."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    cwd = os.getcwd()
+    return [
+        os.path.normpath(os.path.join(here, "..", "..", "shared", "users_access.json")),
+        os.path.normpath(os.path.join(here, "..", "shared", "users_access.json")),
+        os.path.normpath(os.path.join(cwd, "shared", "users_access.json")),
+        os.path.normpath(os.path.join(cwd, "..", "..", "shared", "users_access.json")),
+    ]
+
+
+def _get_sso_secret() -> str:
+    """Resolve SSO HMAC secret from users_access.json, st.secrets, or default."""
+    for candidate in _resolve_users_access_paths():
+        if os.path.isfile(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and data.get("sso_secret"):
+                    return str(data["sso_secret"])
+            except Exception:
+                continue
+    try:
+        if hasattr(st, "secrets") and "SSO_SECRET" in st.secrets:
+            return str(st.secrets["SSO_SECRET"])
+    except Exception:
+        pass
+    return DEFAULT_SSO_SECRET
+
+
+def verify_sullapps_sso(max_age_seconds: int = 86400) -> dict | None:
+    """
+    Verifies the HMAC-SHA256 signed SSO parameters passed by the SullApps Hub
+    (`sso_user`, `sso_role`, `sso_name`, `sso_ts`, `sso_sig`).
+    Caches valid identity in `st.session_state['_sullapps_sso_payload']`.
+    """
+    cached = st.session_state.get("_sullapps_sso_payload")
+    if isinstance(cached, dict) and cached.get("username"):
+        return cached
+
+    try:
+        qp = st.query_params
+        sso_user = str(qp.get("sso_user", "")).strip()
+        sso_role = str(qp.get("sso_role", "")).strip()
+        sso_name = str(qp.get("sso_name", "")).strip()
+        sso_ts = str(qp.get("sso_ts", "")).strip()
+        sso_sig = str(qp.get("sso_sig", "")).strip()
+    except Exception:
+        return None
+
+    if not sso_user or not sso_ts or not sso_sig:
+        return None
+
+    try:
+        ts_int = int(sso_ts)
+        now = int(time.time())
+        if abs(now - ts_int) > max_age_seconds:
+            return None
+    except ValueError:
+        return None
+
+    secret = _get_sso_secret()
+    payload_str = f"{sso_user}|{sso_role}|{sso_ts}"
+    expected_sig = hmac.new(
+        secret.encode("utf-8"),
+        payload_str.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_sig, sso_sig):
+        return None
+
+    identity = {
+        "username": sso_user,
+        "role": sso_role or "user",
+        "display_name": sso_name or sso_user,
+    }
+    st.session_state["_sullapps_sso_payload"] = identity
+    return identity
+
+
+def clear_sullapps_sso() -> None:
+    """Clears cached SullApps SSO session state."""
+    st.session_state.pop("_sullapps_sso_payload", None)
+
+
+def render_sullapps_portal_notice(portal_url: str = "https://sullapps.fedev.com.ar/default.php") -> None:
+    """
+    Renders a clean banner reminding users that SullApps uses unified login at the main portal.
+    """
+    safe_url = html.escape(portal_url)
+    st.markdown(
+        f"""
+        <div style="
+            background: linear-gradient(135deg, #F0FDF4 0%, #DCFCE7 100%);
+            border: 1px solid #86EFAC;
+            border-left: 5px solid #006837;
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin-bottom: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        ">
+            <div style="font-size: 0.9rem; color: #064E3B; line-height: 1.4;">
+                <strong>🔐 Acceso Unificado SullApps:</strong> Ingresá desde el portal principal con tu clave única para acceder automáticamente a todas tus aplicaciones habilitadas.
+            </div>
+            <a href="{safe_url}" target="_top" style="
+                background: #006837;
+                color: #FFFFFF;
+                text-decoration: none;
+                font-weight: 700;
+                font-size: 0.84rem;
+                padding: 8px 14px;
+                border-radius: 8px;
+                white-space: nowrap;
+                box-shadow: 0 2px 6px rgba(0, 104, 55, 0.2);
+            ">Ir a SullApps Hub →</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def load_quotes_dict() -> dict[str, list[str]]:
