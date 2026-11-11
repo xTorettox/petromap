@@ -13,8 +13,10 @@ from shapely.geometry import Point, shape
 import requests
 import zipfile
 import io
+from sullapps_ui import inject_custom_css, sullapps_spinner, celebrate_success
 
-st.set_page_config(page_title="Mapa de Áreas Hidrocarburíferas", page_icon="🛢️", layout="wide")
+st.set_page_config(page_title="PetroMaps | Áreas Hidrocarburíferas", page_icon="🛢️", layout="wide")
+inject_custom_css()
 
 # ==============================================================================
 # 0. SISTEMA DE LOGIN Y CONTROL DE ACCESO
@@ -96,11 +98,11 @@ def actualizar_datos():
     url_zip = "https://portaldatosabiertos.neuquen.gov.ar/dataset/8447d6e8-3162-4217-91f9-974a6821217e/resource/8750c10c-9ad9-473f-9862-a9b1dabaf7d4/download/areas_hidrocarburiferas.zip" 
     
     try:
-        with st.spinner("Descargando e instalando mapa actualizado desde Neuquén..."):
+        with sullapps_spinner("general"):
             r = requests.get(url_zip, timeout=30)
             z = zipfile.ZipFile(io.BytesIO(r.content))
             z.extractall("data/")
-        st.sidebar.success("¡Datos actualizados correctamente!")
+        celebrate_success("¡Datos geográficos actualizados correctamente desde Neuquén!")
         st.cache_data.clear()
         st.rerun()
     except Exception as e:
@@ -299,6 +301,8 @@ if 'map_center' not in st.session_state:
     st.session_state.map_center = CENTRO_DEFECTO
 if 'map_zoom' not in st.session_state:
     st.session_state.map_zoom = 7
+if 'map_theme' not in st.session_state:
+    st.session_state.map_theme = "Claro (CartoDB Positron)"
 
 # ==============================================================================
 # 5. INTERCEPCIÓN DE CLICS EN EL MAPA (1 SOLO PASO)
@@ -436,6 +440,22 @@ with st.sidebar:
 
     st.divider()
 
+    # --- SELECTOR DE TEMA DEL MAPA (CLARO / OSCURO) ---
+    st.header("🌓 Tema Visual del Mapa")
+    MAP_THEME_OPTIONS = [
+        "Claro (CartoDB Positron)",
+        "Oscuro (CartoDB Dark Matter)",
+        "Clásico (Esri Street Map)"
+    ]
+    st.radio(
+        "Capa base del mapa:",
+        options=MAP_THEME_OPTIONS,
+        key="map_theme",
+        help="Alterná entre modo Claro y Oscuro sin recargar las capas de datos."
+    )
+
+    st.divider()
+
     # --- PINCEL DE COLOR ---
     st.header("🎨 Pincel de Selección")
     color_pincel = st.color_picker("Color para pintar polígonos:", value="#FF5733", key="color_picker_pincel")
@@ -511,6 +531,8 @@ with st.sidebar:
 # ==============================================================================
 # 9. ESTILOS DINÁMICOS Y CONSTRUCCIÓN DEL MAPA FOLIUM
 # ==============================================================================
+es_modo_oscuro = "Oscuro" in st.session_state.get("map_theme", "")
+
 def estilo_iluminado(feature):
     props = feature.get('properties', {})
     nombre_area = str(props.get(COL_NOMBRE, ''))
@@ -521,9 +543,9 @@ def estilo_iluminado(feature):
         color_guardado = info_pintada["color"] if isinstance(info_pintada, dict) else info_pintada
         return {
             'fillColor': color_guardado,
-            'color': '#111111',
+            'color': '#FFFFFF' if es_modo_oscuro else '#111111',
             'weight': 2.5,
-            'fillOpacity': 0.8
+            'fillOpacity': 0.82
         }
     
     iluminar = False
@@ -532,25 +554,50 @@ def estilo_iluminado(feature):
     elif st.session_state.operadora_elegida != "TODAS" and empresa == st.session_state.operadora_elegida:
         iluminar = True
     elif st.session_state.area_elegida == "TODAS" and st.session_state.operadora_elegida == "TODAS":
-        return {'fillColor': '#3388ff', 'color': 'black', 'weight': 1, 'fillOpacity': 0.35}
+        if es_modo_oscuro:
+            return {'fillColor': '#38BDF8', 'color': '#93C5FD', 'weight': 1.3, 'fillOpacity': 0.30}
+        return {'fillColor': '#3388ff', 'color': '#1E293B', 'weight': 1.1, 'fillOpacity': 0.35}
         
     if iluminar:
+        if es_modo_oscuro:
+            return {'fillColor': '#00FF69', 'color': '#FFFFFF', 'weight': 3, 'fillOpacity': 0.75}
         return {'fillColor': '#00ff00', 'color': 'black', 'weight': 3, 'fillOpacity': 0.7}
     else:
+        if es_modo_oscuro:
+            return {'fillColor': '#334155', 'color': '#64748B', 'weight': 1, 'fillOpacity': 0.18}
         return {'fillColor': '#cccccc', 'color': 'gray', 'weight': 1, 'fillOpacity': 0.1}
+
+tema_actual = st.session_state.get("map_theme", "Claro (CartoDB Positron)")
+if "Oscuro" in tema_actual:
+    tile_url = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+    tile_attr = "&copy; OpenStreetMap contributors &copy; CARTO (Dark Matter)"
+elif "Claro" in tema_actual:
+    tile_url = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
+    tile_attr = "&copy; OpenStreetMap contributors &copy; CARTO (Positron)"
+else:
+    tile_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+    tile_attr = "Esri"
 
 mapa = folium.Map(
     location=st.session_state.map_center,
     zoom_start=st.session_state.map_zoom,
-    tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
-    attr='Esri'
+    tiles=tile_url,
+    attr=tile_attr
 )
 
 folium.GeoJson(
     gdf_simplificado,
-    name='Áreas',
+    name='Áreas Concesionadas',
     style_function=estilo_iluminado,
-    tooltip=folium.GeoJsonTooltip(fields=[COL_NOMBRE, COL_OPERADORA])
+    tooltip=folium.GeoJsonTooltip(
+        fields=[COL_NOMBRE, COL_OPERADORA],
+        aliases=['🛢️ Área:', '🏢 Operadora:'],
+        style=(
+            "background-color: #0F172A; color: #F8FAFC; border: 1px solid #38BDF8; border-radius: 6px; padding: 6px 10px; font-family: sans-serif;"
+            if es_modo_oscuro else
+            "background-color: #FFFFFF; color: #1F2937; border: 1px solid #006837; border-radius: 6px; padding: 6px 10px; font-family: sans-serif;"
+        )
+    )
 ).add_to(mapa)
 
 for pf in puntos_fijos:
