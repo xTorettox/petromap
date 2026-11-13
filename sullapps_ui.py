@@ -2,9 +2,10 @@
 SullApps Suite - Shared Python UI Helper Module
 Sullair Argentina S.A.
 
-Provides standardized enterprise styling, contextual loading spinners powered by
-`shared/quotes/loading_quotes.json`, celebration notifications, and unified
-Single Sign-On (SSO) verification across all SullApps.
+Provides standardized enterprise styling, live ecosystem sync (`api/ecosystem.php`),
+contextual loading spinners powered by `shared/quotes/loading_quotes.json`,
+celebration notifications, iframe user-activity heartbeats (for the 2-hour idle timeout),
+and unified Single Sign-On (SSO) verification across all SullApps.
 """
 
 import os
@@ -14,8 +15,10 @@ import hmac
 import hashlib
 import time
 import random
+import urllib.request
 from contextlib import contextmanager
 import streamlit as st
+import streamlit.components.v1 as components
 
 SULLAIR_PRIMARY = "#006837"
 SULLAIR_DARK = "#004D26"
@@ -24,7 +27,10 @@ SULLAIR_BG = "#F8F9FA"
 SULLAIR_CARD = "#FFFFFF"
 SULLAIR_TEXT = "#1F2937"
 
-DEFAULT_SSO_SECRET = "SullApps_Enterprise_SSO_Secret_Key_2026_FedeCendra"
+ECOSYSTEM_API_URL = os.environ.get(
+    "SULLAPPS_ECOSYSTEM_API_URL",
+    "https://sullapps.fedev.com.ar/api/ecosystem.php",
+)
 
 DEFAULT_QUOTES = {
     "general": [
@@ -50,44 +56,80 @@ def _resolve_quotes_paths() -> list[str]:
     here = os.path.dirname(os.path.abspath(__file__))
     cwd = os.getcwd()
     return [
+        os.path.normpath(os.path.join(here, "quotes", "loading_quotes.json")),
         os.path.normpath(os.path.join(here, "..", "..", "shared", "quotes", "loading_quotes.json")),
         os.path.normpath(os.path.join(here, "..", "shared", "quotes", "loading_quotes.json")),
-        os.path.normpath(os.path.join(here, "quotes", "loading_quotes.json")),
+        os.path.normpath(os.path.join(cwd, "quotes", "loading_quotes.json")),
         os.path.normpath(os.path.join(cwd, "shared", "quotes", "loading_quotes.json")),
-        os.path.normpath(os.path.join(cwd, "..", "..", "shared", "quotes", "loading_quotes.json")),
         os.path.normpath(os.path.join(here, "loading_quotes.json")),
     ]
 
 
-def _resolve_users_access_paths() -> list[str]:
-    """Return candidate paths for shared/users_access.json."""
+def _resolve_env_paths() -> list[str]:
+    """Return candidate paths for .env in local development."""
     here = os.path.dirname(os.path.abspath(__file__))
     cwd = os.getcwd()
     return [
-        os.path.normpath(os.path.join(here, "..", "..", "shared", "users_access.json")),
-        os.path.normpath(os.path.join(here, "..", "shared", "users_access.json")),
-        os.path.normpath(os.path.join(cwd, "shared", "users_access.json")),
-        os.path.normpath(os.path.join(cwd, "..", "..", "shared", "users_access.json")),
+        os.path.normpath(os.path.join(here, ".env")),
+        os.path.normpath(os.path.join(here, "..", ".env")),
+        os.path.normpath(os.path.join(here, "..", "..", ".env")),
+        os.path.normpath(os.path.join(cwd, ".env")),
+        os.path.normpath(os.path.join(cwd, "..", "..", ".env")),
     ]
 
 
 def _get_sso_secret() -> str:
-    """Resolve SSO HMAC secret from users_access.json, st.secrets, or default."""
-    for candidate in _resolve_users_access_paths():
-        if os.path.isfile(candidate):
-            try:
-                with open(candidate, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict) and data.get("sso_secret"):
-                    return str(data["sso_secret"])
-            except Exception:
-                continue
+    """
+    Resolve SSO HMAC secret from `st.secrets["SSO_SECRET"]`,
+    `os.environ["SULLAPPS_SSO_SECRET"]`, or local `.env` file.
+    """
     try:
-        if hasattr(st, "secrets") and "SSO_SECRET" in st.secrets:
-            return str(st.secrets["SSO_SECRET"])
+        if hasattr(st, "secrets"):
+            if "SSO_SECRET" in st.secrets and st.secrets["SSO_SECRET"]:
+                return str(st.secrets["SSO_SECRET"]).strip()
+            if "SULLAPPS_SSO_SECRET" in st.secrets and st.secrets["SULLAPPS_SSO_SECRET"]:
+                return str(st.secrets["SULLAPPS_SSO_SECRET"]).strip()
     except Exception:
         pass
-    return DEFAULT_SSO_SECRET
+
+    env_val = os.environ.get("SULLAPPS_SSO_SECRET") or os.environ.get("SSO_SECRET")
+    if env_val:
+        return str(env_val).strip()
+
+    for env_path in _resolve_env_paths():
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("SULLAPPS_SSO_SECRET="):
+                            return line.split("=", 1)[1].strip().strip("\"'")
+            except Exception:
+                continue
+
+    return ""
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_ecosystem_config() -> dict:
+    """
+    Fetches live corporate theme, active apps catalog, and loading quotes from
+    `https://sullapps.fedev.com.ar/api/ecosystem.php` (cached 300s).
+    Falls back gracefully if offline.
+    """
+    try:
+        req = urllib.request.Request(
+            ECOSYSTEM_API_URL,
+            headers={"User-Agent": "SullApps-Streamlit-Client/2.0"},
+        )
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            if resp.status == 200:
+                payload = json.loads(resp.read().decode("utf-8"))
+                if isinstance(payload, dict) and payload.get("status") == "ok":
+                    return payload
+    except Exception:
+        pass
+    return {}
 
 
 def verify_sullapps_sso(max_age_seconds: int = 86400) -> dict | None:
@@ -122,14 +164,25 @@ def verify_sullapps_sso(max_age_seconds: int = 86400) -> dict | None:
         return None
 
     secret = _get_sso_secret()
-    payload_str = f"{sso_user}|{sso_role}|{sso_ts}"
-    expected_sig = hmac.new(
-        secret.encode("utf-8"),
-        payload_str.encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
+    if not secret:
+        return None
 
-    if not hmac.compare_digest(expected_sig, sso_sig):
+    payload_formats = [
+        f"{sso_user}|{sso_role}|{sso_ts}",
+        f"{sso_user.lower()}|{sso_role.lower()}|{sso_ts}",
+    ]
+    sig_valid = False
+    for pf in payload_formats:
+        expected_sig = hmac.new(
+            secret.encode("utf-8"),
+            pf.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(expected_sig, sso_sig):
+            sig_valid = True
+            break
+
+    if not sig_valid:
         return None
 
     identity = {
@@ -148,49 +201,77 @@ def clear_sullapps_sso() -> None:
 
 def render_sullapps_portal_notice(portal_url: str = "https://sullapps.fedev.com.ar/default.php") -> None:
     """
-    Renders a clean banner reminding users that SullApps uses unified login at the main portal.
+    Bloquea el acceso directo no autenticado a los subdominios de Streamlit Cloud y redirige
+    automáticamente al portal principal SullApps (`https://sullapps.fedev.com.ar/default.php`).
     """
     safe_url = html.escape(portal_url)
     st.markdown(
         f"""
         <div style="
             background: linear-gradient(135deg, #F0FDF4 0%, #DCFCE7 100%);
-            border: 1px solid #86EFAC;
-            border-left: 5px solid #006837;
-            border-radius: 10px;
-            padding: 14px 18px;
+            border: 1.5px solid #86EFAC;
+            border-left: 6px solid #006837;
+            border-radius: 12px;
+            padding: 18px 22px;
             margin-bottom: 18px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            gap: 12px;
+            gap: 14px;
             flex-wrap: wrap;
         ">
-            <div style="font-size: 0.9rem; color: #064E3B; line-height: 1.4;">
-                <strong>🔐 Acceso Unificado SullApps:</strong> Ingresá desde el portal principal con tu clave única para acceder automáticamente a todas tus aplicaciones habilitadas.
+            <div style="font-size: 0.94rem; color: #064E3B; line-height: 1.5;">
+                <strong>🔐 Acceso Exclusivo vía SullApps Hub:</strong><br>
+                Por seguridad corporativa, debés ingresar desde el portal principal <b>SullApps</b> con tu clave única.
             </div>
             <a href="{safe_url}" target="_top" style="
                 background: #006837;
                 color: #FFFFFF;
                 text-decoration: none;
                 font-weight: 700;
-                font-size: 0.84rem;
-                padding: 8px 14px;
+                font-size: 0.88rem;
+                padding: 10px 18px;
                 border-radius: 8px;
                 white-space: nowrap;
-                box-shadow: 0 2px 6px rgba(0, 104, 55, 0.2);
+                box-shadow: 0 2px 6px rgba(0, 104, 55, 0.25);
             ">Ir a SullApps Hub →</a>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
+    try:
+        components.html(
+            f"""
+            <script>
+            setTimeout(function() {{
+                try {{
+                    if (window.top === window.self) {{
+                        window.top.location.replace("{safe_url}?login_required=1");
+                    }}
+                }} catch (e) {{
+                    window.location.replace("{safe_url}?login_required=1");
+                }}
+            }}, 1200);
+            </script>
+            """,
+            height=0,
+        )
+    except Exception:
+        pass
+    st.stop()
+
 
 def load_quotes_dict() -> dict[str, list[str]]:
     """
-    Loads `loading_quotes.json` dynamically from disk on every call so live edits
-    are reflected immediately without restarting the server. Falls back to DEFAULT_QUOTES.
+    Loads quotes from the central `/api/ecosystem.php` endpoint first (cached 300s),
+    falling back to local `quotes/loading_quotes.json` and `DEFAULT_QUOTES` if offline.
     """
+    live_cfg = fetch_ecosystem_config()
+    live_quotes = live_cfg.get("quotes") if isinstance(live_cfg, dict) else None
+    if isinstance(live_quotes, dict) and live_quotes:
+        return live_quotes
+
     for candidate in _resolve_quotes_paths():
         if os.path.isfile(candidate):
             try:
@@ -223,7 +304,7 @@ def get_loading_quote(task_type: str = "default") -> str:
 @contextmanager
 def sullapps_spinner(task_type: str = "default", custom_prefix: str = ""):
     """
-    Context manager that reads `loading_quotes.json` (with built-in fallback)
+    Context manager that reads `loading_quotes.json` (or live `/api/ecosystem.php`)
     and displays `st.spinner(...)` with a fun/relatable Sullair quote.
     """
     quote = get_loading_quote(task_type)
@@ -289,11 +370,61 @@ def celebrate_success(message: str, subtitle: str = "", use_balloons: bool = Tru
     )
 
 
+def _inject_activity_heartbeat() -> None:
+    """
+    Injects a zero-height script that listens for user interactions inside the Streamlit
+    iframe (`click`, `keydown`, `mousemove`, `scroll`, `touchstart`, throttled to 15s) and emits
+    `window.parent.postMessage({ type: 'SULLAPPS_USER_ACTIVITY' }, '*')` to reset the parent Hub's
+    2-hour idle session countdown.
+    """
+    try:
+        components.html(
+            """
+            <script>
+            (function() {
+                var lastSent = 0;
+                var THROTTLE_MS = 15000;
+                function notifyParentActivity() {
+                    var now = Date.now();
+                    if ((now - lastSent) < THROTTLE_MS) return;
+                    lastSent = now;
+                    try {
+                        if (window.parent && window.parent !== window) {
+                            window.parent.postMessage({ type: 'SULLAPPS_USER_ACTIVITY', ts: now }, '*');
+                        }
+                        if (window.top && window.top !== window) {
+                            window.top.postMessage({ type: 'SULLAPPS_USER_ACTIVITY', ts: now }, '*');
+                        }
+                    } catch (e) {}
+                }
+                notifyParentActivity();
+                var targetDoc = document;
+                try {
+                    if (window.parent && window.parent.document) {
+                        targetDoc = window.parent.document;
+                    }
+                } catch (e) {
+                    targetDoc = document;
+                }
+                ['click', 'keydown', 'mousemove', 'scroll', 'touchstart'].forEach(function(evt) {
+                    targetDoc.addEventListener(evt, notifyParentActivity, { passive: true });
+                    document.addEventListener(evt, notifyParentActivity, { passive: true });
+                });
+            })();
+            </script>
+            """,
+            height=0,
+        )
+    except Exception:
+        pass
+
+
 def inject_custom_css() -> None:
     """
     Polishes cards, buttons, tabs, tables, and form controls to match Sullair Enterprise style,
-    and hides redundant Streamlit default headers/footers for clean iframe & standalone rendering.
+    hides redundant Streamlit default headers/footers, and activates the parent idle heartbeat.
     """
+    _inject_activity_heartbeat()
     st.markdown(
         """
         <style>
@@ -349,85 +480,81 @@ def inject_custom_css() -> None:
             border-color: #006837 !important;
             color: #FFFFFF !important;
             font-weight: 700 !important;
-            border-radius: 8px !important;
-            box-shadow: 0 2px 6px rgba(0, 104, 55, 0.18) !important;
+            border-radius: 10px !important;
+            box-shadow: 0 3px 10px rgba(0, 104, 55, 0.18) !important;
             transition: all 0.18s ease !important;
         }
+
         button[kind="primary"]:hover,
         button[data-testid="stBaseButton-primary"]:hover,
-        button[data-testid="baseButton-primary"]:hover,
-        .stFormSubmitButton > button[kind="primary"]:hover {
-            background: linear-gradient(135deg, #007F43 0%, #006837 100%) !important;
+        button[data-testid="baseButton-primary"]:hover {
+            background: linear-gradient(135deg, #00522B 0%, #003D20 100%) !important;
             border-color: #004D26 !important;
-            box-shadow: 0 4px 12px rgba(0, 104, 55, 0.28) !important;
-            transform: translateY(-1px);
+            transform: translateY(-1px) !important;
+            box-shadow: 0 6px 14px rgba(0, 104, 55, 0.25) !important;
         }
 
-        /* Secondary Buttons */
+        /* Secondary Action Buttons */
         button[kind="secondary"],
-        button[data-testid="stBaseButton-secondary"] {
-            border-radius: 8px !important;
+        button[data-testid="stBaseButton-secondary"],
+        button[data-testid="baseButton-secondary"] {
+            border-radius: 10px !important;
             font-weight: 600 !important;
             border: 1px solid #D1D5DB !important;
-            transition: all 0.15s ease !important;
+            transition: all 0.18s ease !important;
         }
+
         button[kind="secondary"]:hover,
-        button[data-testid="stBaseButton-secondary"]:hover {
+        button[data-testid="stBaseButton-secondary"]:hover,
+        button[data-testid="baseButton-secondary"]:hover {
             border-color: #006837 !important;
             color: #006837 !important;
             background-color: #F0FDF4 !important;
         }
 
-        /* Tabs Polish */
-        div[data-testid="stTabs"] button[role="tab"] {
-            font-weight: 600 !important;
-            color: #4B5563 !important;
-            padding: 8px 16px !important;
-            border-radius: 8px 8px 0 0 !important;
-            transition: all 0.15s ease !important;
-        }
-        div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
-            color: #006837 !important;
-            font-weight: 700 !important;
-            background-color: rgba(0, 104, 55, 0.06) !important;
-        }
-
-        /* Expanders & Bordered Containers */
-        div[data-testid="stExpander"] {
-            background-color: #FFFFFF;
+        /* Metric Cards, Expanders & Form Containers */
+        [data-testid="stMetric"],
+        [data-testid="stForm"],
+        [data-testid="stExpander"] {
+            background-color: #FFFFFF !important;
             border: 1px solid #E5E7EB !important;
-            border-radius: 10px !important;
-            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.03);
-            overflow: hidden;
-        }
-        div[data-testid="stExpander"] summary {
-            font-weight: 700 !important;
-            color: #1F2937 !important;
+            border-radius: 12px !important;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04) !important;
         }
 
-        /* Dataframes & Tables */
-        div[data-testid="stDataFrame"],
-        div[data-testid="stDataEditor"] {
-            border: 1px solid #E5E7EB;
-            border-radius: 10px;
-            overflow: hidden;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+        [data-testid="stMetric"] {
+            padding: 14px 18px !important;
         }
 
-        /* Metric Cards */
-        div[data-testid="stMetric"] {
-            background: #FFFFFF;
-            border: 1px solid #E5E7EB;
-            border-left: 4px solid #006837;
-            border-radius: 10px;
-            padding: 12px 16px;
-            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.03);
+        /* Tabs Styling */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 8px;
+            border-bottom: 2px solid #E5E7EB;
         }
 
-        /* Sidebar Styling */
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 8px 8px 0 0 !important;
+            padding: 8px 16px !important;
+            font-weight: 600 !important;
+        }
+
+        .stTabs [aria-selected="true"] {
+            color: #006837 !important;
+            border-bottom-color: #006837 !important;
+            background-color: #F0FDF4 !important;
+        }
+
+        /* Sidebar Polish */
         section[data-testid="stSidebar"] {
             background-color: #FFFFFF !important;
             border-right: 1px solid #E5E7EB !important;
+        }
+
+        /* Dataframes & Tables */
+        [data-testid="stDataFrame"] {
+            border-radius: 10px !important;
+            overflow: hidden !important;
+            border: 1px solid #E5E7EB !important;
         }
         </style>
         """,

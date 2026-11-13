@@ -13,6 +13,7 @@ import shutil
 import zipfile
 import html
 from datetime import datetime
+from urllib.parse import unquote as url_unquote
 from shapely.geometry import Point, shape
 import requests
 
@@ -70,47 +71,6 @@ if sso_identity and not st.session_state.usuario:
     st.session_state.nombre_usuario = sso_identity.get("display_name") or sso_user
 
 
-def _verificar_credenciales_locales(us: str, pw: str) -> str | None:
-    """Valida credenciales contra shared/users_access.json o fallback local."""
-    us_clean = (us or "").strip().lower()
-    pw_clean = (pw or "").strip()
-    if not us_clean or not pw_clean:
-        return None
-
-    # Intentar leer shared/users_access.json si está disponible
-    posibles_rutas = [
-        os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "shared", "users_access.json")),
-        os.path.normpath(os.path.join(os.getcwd(), "shared", "users_access.json")),
-    ]
-    for ruta in posibles_rutas:
-        if os.path.isfile(ruta):
-            try:
-                with open(ruta, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                users_list = cfg.get("users", [])
-                if isinstance(users_list, list):
-                    for u_info in users_list:
-                        if str(u_info.get("usuario", "")).strip().lower() == us_clean:
-                            if not u_info.get("activo", True):
-                                return None
-                            apps_permitidas = u_info.get("apps", [])
-                            if "*" not in apps_permitidas and "petromaps" not in apps_permitidas:
-                                return None
-                            pws = [str(p) for p in u_info.get("passwords", [])]
-                            if u_info.get("password"):
-                                pws.append(str(u_info["password"]))
-                            if pw_clean in pws:
-                                return "admin" if (u_info.get("rol") == "admin" or us_clean in ("fcendra", "admin")) else "user"
-            except Exception:
-                pass
-
-    if us_clean == "fcendra" and pw_clean == "C4n1ch3r1426":
-        return "admin"
-    if us_clean == "gensullair" and pw_clean == "2026sullair!":
-        return "user"
-    return None
-
-
 if not st.session_state.usuario:
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
@@ -120,20 +80,6 @@ if not st.session_state.usuario:
             st.title("SULLAIR ARGENTINA")
 
         render_sullapps_portal_notice()
-
-        with st.expander("🔑 Ingreso directo (Usuarios autorizados)", expanded=True):
-            st.subheader("🔒 Acceso al Sistema")
-            us = st.text_input("Usuario")
-            pw = st.text_input("Contraseña", type="password")
-
-            if st.button("Ingresar", type="primary", use_container_width=True):
-                rol = _verificar_credenciales_locales(us, pw)
-                if rol:
-                    st.session_state.usuario = rol
-                    st.session_state.nombre_usuario = us.strip()
-                    st.rerun()
-                else:
-                    st.error("Credenciales incorrectas o sin permiso para PetroMaps.")
     st.stop()
 
 # ==============================================================================
@@ -322,13 +268,16 @@ def decimal_a_gms(lat, lon):
 def _validar_y_ajustar_lat_lon(lat, lon):
     """
     Verifica que las coordenadas sean válidas y corrige inversión accidental (Lon, Lat).
+    En Argentina / Cuenca Neuquina, Latitud ~ [-30, -56] y Longitud ~ [-56, -76].
     """
     if lat is None or lon is None:
         return None, None
     try:
         lat = float(lat)
         lon = float(lon)
-        if abs(lat) > 50 and abs(lon) < 50:
+        if abs(lat) > 90 and abs(lon) <= 90:
+            lat, lon = lon, lat
+        elif abs(lat) > 56 and abs(lon) <= 56:
             lat, lon = lon, lat
         if -90 <= lat <= 90 and -180 <= lon <= 180:
             return lat, lon
@@ -337,54 +286,128 @@ def _validar_y_ajustar_lat_lon(lat, lon):
     return None, None
 
 
+def _parse_dms_component(deg_s, min_s, sec_s, dir_s):
+    val = float(deg_s) + float(min_s) / 60.0 + float(str(sec_s).replace(",", ".")) / 3600.0
+    d = (dir_s or "").upper()
+    if d in ("S", "W", "O") or str(deg_s).strip().startswith("-"):
+        val = -abs(val)
+    return val
+
+
 def extraer_coordenadas(texto):
     """
-    Parser flexible de coordenadas para cualquier formato de DMS, Decimal o Maps.
+    Parser ultra-robusto de coordenadas para cualquier formato de link de Google Maps
+    (corto maps.app.goo.gl, largo con pin !3d!4d, search query, protobuf !1d!2d, @viewport),
+    GMS (Grados, Minutos, Segundos en cualquier orden) o Grados Decimales.
     """
     if not texto or not isinstance(texto, str):
         return None, None
 
-    texto = texto.strip()
+    texto_original = texto.strip()
+    url_candidate = texto_original
 
-    if "maps.app.goo.gl" in texto or "goo.gl/maps" in texto:
+    # 1. Si el usuario pegó texto compartido desde el celular ("Ubicación X https://maps.app.goo.gl/...")
+    m_http = re.search(r"(https?://\S+)", texto_original)
+    if m_http:
+        url_candidate = m_http.group(1).strip()
+
+    # 2. Resolver links cortos de Google Maps siguiendo redirecciones con User-Agent de navegador
+    if any(k in url_candidate.lower() for k in ("maps.app.goo.gl", "goo.gl/maps", "g.co/maps", "maps.google.")):
         try:
-            r = requests.get(texto, allow_redirects=True, timeout=5)
-            texto = r.url
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+            }
+            r = requests.get(url_candidate, allow_redirects=True, timeout=8, headers=headers)
+            resolved_url = url_unquote(r.url)
+            # Si Google devuelve una página intermedia con el link real en el HTML, extraerlo
+            if "google.com/maps" not in resolved_url and r.text:
+                m_body_url = re.search(r"https?://(?:www\.)?google\.[a-z.]+/maps[^\s\"'<>]+", r.text)
+                if m_body_url:
+                    resolved_url = url_unquote(m_body_url.group(0))
+            url_candidate = resolved_url
         except Exception:
-            pass
+            url_candidate = url_unquote(url_candidate)
+    else:
+        url_candidate = url_unquote(url_candidate)
 
-    match_url = re.search(r"[@?&/](-?\d{1,2}\.\d+)[,/](-?\d{1,3}\.\d+)", texto)
-    if match_url:
-        lat, lon = float(match_url.group(1)), float(match_url.group(2))
+    # 3.Si es una URL de Maps, priorizar SIEMPRE la coordenada exacta del PIN (!3d = Lat, !4d = Lon)
+    # sobre la cámara (@lat,lon), ya que el panel lateral de Google Maps desplaza el @centro ~1.7 km.
+    matches_pin_3d4d = re.findall(r"!3d(-?\d{1,2}\.\d+)!4d(-?\d{1,3}\.\d+)", url_candidate)
+    if matches_pin_3d4d:
+        lat_str, lon_str = matches_pin_3d4d[-1]
+        return _validar_y_ajustar_lat_lon(float(lat_str), float(lon_str))
+
+    # 4. Parámetros explícitos de búsqueda/ubicación en URL (?q=, ?query=, ?ll=, /maps/search/, /maps/place/)
+    match_query_coords = re.search(
+        r"(?:[?&](?:q|query|ll|center|daddr|saddr|destination|origin)=|/maps/(?:search|place|dir)/)"
+        r"[^0-9-]*(-?\d{1,3}\.\d+)\s*(?:,|%2C|\+|\s)+\s*([-+]?\d{1,3}\.\d+)",
+        url_candidate,
+        re.IGNORECASE,
+    )
+    if match_query_coords:
+        lat, lon = float(match_query_coords.group(1)), float(match_query_coords.group(2))
         return _validar_y_ajustar_lat_lon(lat, lon)
 
-    t = texto.replace("”", '"').replace("’", "'").replace("″", '"').replace("′", "'").replace("´", "'")
+    # 5. Protobuf invertido en links de rutas/embed (!1d = Longitud, !2d = Latitud)
+    matches_1d2d = re.findall(r"!1d(-?\d{1,3}\.\d+)!2d(-?\d{1,2}\.\d+)", url_candidate)
+    if matches_1d2d:
+        lon_str, lat_str = matches_1d2d[-1]
+        return _validar_y_ajustar_lat_lon(float(lat_str), float(lon_str))
 
-    regex_dms = r'(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*([NSns])\s*[,;/]?\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*([EWOewo])'
-    match_dms = re.search(regex_dms, t)
-    if match_dms:
-        lat_d, lat_m, lat_s, lat_dir, lon_d, lon_m, lon_s, lon_dir = match_dms.groups()
-        lat = float(lat_d) + float(lat_m) / 60.0 + float(lat_s) / 3600.0
-        if lat_dir.upper() == "S":
-            lat = -lat
-        lon = float(lon_d) + float(lon_m) / 60.0 + float(lon_s) / 3600.0
-        if lon_dir.upper() in ["W", "O"]:
-            lon = -lon
+    # 6. Normalizar comillas para buscar GMS (dentro de la URL resuelta o en el texto plano)
+    for fuente in (url_candidate, texto_original):
+        t = (
+            fuente.replace("”", '"')
+            .replace("“", '"')
+            .replace("’", "'")
+            .replace("‘", "'")
+            .replace("″", '"')
+            .replace("′", "'")
+            .replace("´", "'")
+            .replace("+", " ")
+        )
+
+        # GMS con letra cardinal al final (ej: 38°12'05.6"S 68°36'07.7"O o invertido E/W primero)
+        dms_tokens = re.findall(
+            r"(\d{1,3})\s*[°º]\s*(\d{1,2})\s*['′]\s*(\d{1,2}(?:[\.,]\d+)?)\s*[\"″]?\s*([NSnsEWOewo])",
+            t,
+        )
+        if len(dms_tokens) >= 2:
+            c1 = _parse_dms_component(*dms_tokens[0])
+            d1 = dms_tokens[0][3].upper()
+            c2 = _parse_dms_component(*dms_tokens[1])
+            d2 = dms_tokens[1][3].upper()
+            if d1 in ("E", "W", "O") and d2 in ("N", "S"):
+                return _validar_y_ajustar_lat_lon(c2, c1)
+            return _validar_y_ajustar_lat_lon(c1, c2)
+
+        # GMS con letra cardinal al principio (ej: S 38°12'05.6", W 68°36'07.7")
+        dms_tokens_inv = re.findall(
+            r"([NSnsEWOewo])\s*(\d{1,3})\s*[°º]\s*(\d{1,2})\s*['′]\s*(\d{1,2}(?:[\.,]\d+)?)\s*[\"″]?",
+            t,
+        )
+        if len(dms_tokens_inv) >= 2:
+            d1, deg1, min1, sec1 = dms_tokens_inv[0]
+            d2, deg2, min2, sec2 = dms_tokens_inv[1]
+            c1 = _parse_dms_component(deg1, min1, sec1, d1)
+            c2 = _parse_dms_component(deg2, min2, sec2, d2)
+            if d1.upper() in ("E", "W", "O") and d2.upper() in ("N", "S"):
+                return _validar_y_ajustar_lat_lon(c2, c1)
+            return _validar_y_ajustar_lat_lon(c1, c2)
+
+    # 7. Fallback en URL: centro de cámara @lat,lon (solo cuando el link no trae pin !3d!4d ni DMS)
+    match_at = re.search(r"@(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)", url_candidate)
+    if match_at:
+        lat, lon = float(match_at.group(1)), float(match_at.group(2))
         return _validar_y_ajustar_lat_lon(lat, lon)
 
-    regex_dms_inv = r'([NSns])\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]?\s*[,;/]?\s*([EWOewo])\s*(\d{1,3})\s*°?\s*(\d{1,2})\s*[\'′]?\s*([\d\.]+)\s*["″]'
-    match_inv = re.search(regex_dms_inv, t)
-    if match_inv:
-        lat_dir, lat_d, lat_m, lat_s, lon_dir, lon_d, lon_m, lon_s = match_inv.groups()
-        lat = float(lat_d) + float(lat_m) / 60.0 + float(lat_s) / 3600.0
-        if lat_dir.upper() == "S":
-            lat = -lat
-        lon = float(lon_d) + float(lon_m) / 60.0 + float(lon_s) / 3600.0
-        if lon_dir.upper() in ["W", "O"]:
-            lon = -lon
-        return _validar_y_ajustar_lat_lon(lat, lon)
-
-    t_dec = re.sub(r"(\d),(\d)", r"\1.\2", t)
+    # 8. Coordenadas decimales directas en texto (ej: "-38.201548, -68.602144" o "-38,201548 -68,602144")
+    t_clean = re.sub(r"https?://\S+", " ", texto_original)
+    # Si se usa coma como separador decimal (ej: -38,201548; -68,602144), convertir a punto
+    t_dec = re.sub(r"(-?\d{1,3}),(\d{3,})", r"\1.\2", t_clean)
     floats = re.findall(r"[-+]?\d{1,3}\.\d+", t_dec)
     if len(floats) >= 2:
         lat, lon = float(floats[0]), float(floats[1])
@@ -477,7 +500,7 @@ if "map_center" not in st.session_state:
 if "map_zoom" not in st.session_state:
     st.session_state.map_zoom = 7
 if "map_theme" not in st.session_state:
-    st.session_state.map_theme = "Claro (Gris Corporativo)"
+    st.session_state.map_theme = "Claro (Mapa Corporativo)"
 if "color_picker_pincel" not in st.session_state:
     st.session_state.color_picker_pincel = "#2B5B84"
 if "preset_color_pincel" not in st.session_state:
@@ -565,7 +588,7 @@ def procesar_busqueda():
         st.session_state.punto_buscado = [lat, lon]
         st.session_state.ultimas_coordenadas = (lat, lon)
         st.session_state.map_center = [lat, lon]
-        st.session_state.map_zoom = 12
+        st.session_state.map_zoom = 14
 
         punto = Point(lon, lat)
         area_encontrada = gdf_completo[gdf_completo.geometry.contains(punto)]
@@ -1016,22 +1039,22 @@ with st.sidebar:
 
     st.divider()
 
-    # --- SELECTOR DE TEMA DEL MAPA (SIN API KEY / 100% LIBRE DE MARCAS DE AGUA) ---
+    # --- SELECTOR DE TEMA DEL MAPA (SIN API KEY / ZOOM PROFUNDO HD SIN CORTES) ---
     st.header("🌓 Tema Visual del Mapa")
     MAP_THEME_OPTIONS = [
-        "Claro (Gris Corporativo)",
+        "Claro (Mapa Corporativo)",
         "Oscuro (Noche Ejecutiva)",
-        "Clásico (Esri Street Map)",
-        "Satélite (Esri World Imagery)",
+        "Satélite Híbrido (Yacimientos & Rutas HD)",
+        "Terreno & Relieve (Topográfico)",
     ]
     if st.session_state.get("map_theme") not in MAP_THEME_OPTIONS:
-        st.session_state.map_theme = "Claro (Gris Corporativo)"
+        st.session_state.map_theme = "Claro (Mapa Corporativo)"
 
     st.radio(
         "Capa base del mapa:",
         options=MAP_THEME_OPTIONS,
         key="map_theme",
-        help="Capas base empresariales Esri ArcGIS libres de API key.",
+        help="Capas cartográficas de alta resolución (hasta Zoom 20) sin límite de acercamiento.",
     )
 
     st.divider()
@@ -1132,7 +1155,7 @@ with st.sidebar:
 # ==============================================================================
 # 10. ESTILOS DINÁMICOS Y CONSTRUCCIÓN DEL MAPA FOLIUM
 # ==============================================================================
-tema_actual = st.session_state.get("map_theme", "Claro (Gris Corporativo)")
+tema_actual = st.session_state.get("map_theme", "Claro (Mapa Corporativo)")
 es_modo_oscuro = "Oscuro" in tema_actual or "Satélite" in tema_actual
 
 
@@ -1173,38 +1196,47 @@ def estilo_iluminado(feature):
         return {"fillColor": "#CBD5E1", "color": "#94A3B8", "weight": 0.8, "fillOpacity": 0.12}
 
 
-# Capas base Esri ArcGIS Online (100% gratuitas y sin API key en Streamlit Cloud)
-ref_tile_url = None
+# Capas cartográficas de alta resolución (Zoom 1 a 20 nativo sin "Map data not yet available")
+usar_filtro_oscuro_css = False
 if "Oscuro" in tema_actual:
-    tile_url = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
-    ref_tile_url = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
-    tile_attr = "Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ"
-elif "Claro" in tema_actual:
-    tile_url = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
-    ref_tile_url = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
-    tile_attr = "Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ"
+    tile_url = "https://mt1.google.com/vt/lyrs=m&hl=es&x={x}&y={y}&z={z}"
+    tile_attr = "Cartografía HD &copy; Google Maps / SullApps GIS"
+    usar_filtro_oscuro_css = True
 elif "Satélite" in tema_actual:
-    tile_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-    tile_attr = "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics"
+    tile_url = "https://mt1.google.com/vt/lyrs=y&hl=es&x={x}&y={y}&z={z}"
+    tile_attr = "Imágenes Satelitales Híbridas HD &copy; Google / Maxar"
+elif "Terreno" in tema_actual:
+    tile_url = "https://mt1.google.com/vt/lyrs=p&hl=es&x={x}&y={y}&z={z}"
+    tile_attr = "Relieve & Topografía HD &copy; Google Maps"
 else:
-    tile_url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
-    tile_attr = "Tiles &copy; Esri"
+    tile_url = "https://mt1.google.com/vt/lyrs=m&hl=es&x={x}&y={y}&z={z}"
+    tile_attr = "Cartografía HD &copy; Google Maps / SullApps GIS"
 
 mapa = folium.Map(
     location=st.session_state.map_center,
     zoom_start=st.session_state.map_zoom,
-    tiles=tile_url,
-    attr=tile_attr,
+    tiles=None,
+    max_zoom=20,
 )
 
-if ref_tile_url:
-    folium.TileLayer(
-        tiles=ref_tile_url,
-        attr=tile_attr,
-        name="Etiquetas Geográficas",
-        overlay=True,
-        control=False,
-    ).add_to(mapa)
+folium.TileLayer(
+    tiles=tile_url,
+    attr=tile_attr,
+    name=tema_actual,
+    max_zoom=20,
+    max_native_zoom=20,
+    control=False,
+).add_to(mapa)
+
+if usar_filtro_oscuro_css:
+    mapa.get_root().header.add_child(
+        folium.Element(
+            "<style>"
+            ".leaflet-tile-pane { filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%); }"
+            ".leaflet-container { background: #0f172a !important; }"
+            "</style>"
+        )
+    )
 
 folium.GeoJson(
     gdf_simplificado,
@@ -1251,6 +1283,7 @@ st.title("🗺️ Visor de Áreas Hidrocarburíferas")
 if st.session_state.ultimas_coordenadas:
     lat_act, lon_act = st.session_state.ultimas_coordenadas
     gms_texto = decimal_a_gms(lat_act, lon_act)
+    gmaps_pin_url = f"https://www.google.com/maps/search/?api=1&query={float(lat_act):.6f},{float(lon_act):.6f}"
     op = st.session_state.ultima_operadora or "Sin operadora"
     area = st.session_state.ultimo_nombre_area or "No especificada"
     tiene_op = bool(st.session_state.ultima_operadora and st.session_state.ultima_operadora not in ["None", "nan", ""])
@@ -1267,6 +1300,7 @@ if st.session_state.ultimas_coordenadas:
     )
 
     gms_json = json.dumps(gms_texto)
+    gmaps_json = json.dumps(gmaps_pin_url)
 
     banner_html = f"""
     <!DOCTYPE html>
@@ -1284,7 +1318,7 @@ if st.session_state.ultimas_coordenadas:
         .banner {{
             background-color: {bg_color};
             color: {text_color};
-            padding: 8px 16px;
+            padding: 8px 14px;
             border-radius: 8px;
             border: 1px solid {border_color};
             display: flex;
@@ -1292,9 +1326,10 @@ if st.session_state.ultimas_coordenadas:
             justify-content: space-between;
             box-sizing: border-box;
             height: 44px;
+            gap: 10px;
         }}
         .info-text {{
-            font-size: 14px;
+            font-size: 13.5px;
             line-height: 1.4;
             display: flex;
             align-items: center;
@@ -1309,31 +1344,41 @@ if st.session_state.ultimas_coordenadas:
             padding: 2px 7px;
             border-radius: 4px;
             font-weight: 600;
-            font-size: 13.5px;
+            font-size: 13px;
             font-family: monospace;
+        }}
+        .actions-group {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-shrink: 0;
         }}
         .btn-copy {{
             background-color: {btn_color};
             color: white;
             border: none;
-            padding: 6px 14px;
+            padding: 6px 11px;
             border-radius: 6px;
             cursor: pointer;
-            font-size: 13px;
+            font-size: 12.5px;
             font-weight: 600;
             white-space: nowrap;
             transition: all 0.2s ease;
             box-shadow: 0 1px 3px rgba(0,0,0,0.12);
-            margin-left: 12px;
             outline: none;
-            flex-shrink: 0;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }}
+        .btn-copy.secondary {{
+            background-color: #ffffff;
+            color: {text_color};
+            border: 1px solid {border_color};
         }}
         .btn-copy:hover {{
-            opacity: 0.9;
+            opacity: 0.92;
             transform: translateY(-1px);
-        }}
-        .btn-copy:active {{
-            transform: translateY(0);
         }}
     </style>
     </head>
@@ -1344,15 +1389,21 @@ if st.session_state.ultimas_coordenadas:
             <span class="coords-code">{gms_texto}</span>
             <span>{info_detalle}</span>
         </div>
-        <button id="btnCopy" class="btn-copy" type="button" onclick="copyCoords()">
-            📋 Copiar
-        </button>
+        <div class="actions-group">
+            <button id="btnCopy" class="btn-copy" type="button" onclick="copyText({gms_json}, 'btnCopy', '📋 Copiar GMS')">
+                📋 Copiar GMS
+            </button>
+            <button id="btnCopyLink" class="btn-copy secondary" type="button" onclick="copyText({gmaps_json}, 'btnCopyLink', '🔗 Link Maps')">
+                🔗 Link Maps
+            </button>
+            <a href="{gmaps_pin_url}" target="_blank" rel="noopener" class="btn-copy secondary" title="Abrir pin exacto en Google Maps">
+                🗺️ Maps ↗
+            </a>
+        </div>
     </div>
     <script>
-    window.copyCoords = function() {{
-        const text = {gms_json};
+    window.copyText = function(text, btnId, originalLabel) {{
         let success = false;
-        
         try {{
             const textarea = document.createElement('textarea');
             textarea.value = text;
@@ -1370,24 +1421,23 @@ if st.session_state.ultimas_coordenadas:
         }} catch (e) {{
             success = false;
         }}
-        
         if (!success && navigator.clipboard && window.isSecureContext) {{
-            navigator.clipboard.writeText(text).then(showSuccess).catch(function(err) {{
+            navigator.clipboard.writeText(text).then(function() {{
+                showSuccess(btnId, originalLabel);
+            }}).catch(function(err) {{
                 console.warn('Clipboard API:', err);
             }});
         }} else if (success) {{
-            showSuccess();
+            showSuccess(btnId, originalLabel);
         }}
     }};
 
-    function showSuccess() {{
-        const btn = document.getElementById('btnCopy');
+    function showSuccess(btnId, originalLabel) {{
+        const btn = document.getElementById(btnId);
         if (btn) {{
             btn.innerText = '✅ ¡Copiado!';
-            btn.style.backgroundColor = '#1b5e20';
             setTimeout(function() {{
-                btn.innerText = '📋 Copiar';
-                btn.style.backgroundColor = '{btn_color}';
+                btn.innerText = originalLabel;
             }}, 2000);
         }}
     }}
