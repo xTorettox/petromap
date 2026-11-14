@@ -201,10 +201,15 @@ def clear_sullapps_sso() -> None:
 
 def render_sullapps_portal_notice(portal_url: str = "https://sullapps.fedev.com.ar/default.php") -> None:
     """
-    Bloquea el acceso directo no autenticado a los subdominios de Streamlit Cloud y redirige
-    automáticamente al portal principal SullApps (`https://sullapps.fedev.com.ar/default.php`).
+    Bloquea el acceso directo no autenticado a los subdominios de Streamlit Cloud y ofrece
+    acceso directo al portal principal SullApps (`https://sullapps.fedev.com.ar/default.php`).
+    Nota: Streamlit Community Cloud ejecuta las apps dentro de un iframe con sandbox que bloquea
+    la redirección automática hacia `window.top`, por lo que el botón usa `target="_blank"`.
     """
-    safe_url = html.escape(portal_url)
+    if not isinstance(portal_url, str) or not portal_url.strip().startswith(("http://", "https://")):
+        portal_url = "https://sullapps.fedev.com.ar/default.php"
+    target_url = f"{portal_url.rstrip('/')}?login_required=1" if "?" not in portal_url else portal_url
+    safe_url = html.escape(target_url)
     st.markdown(
         f"""
         <div style="
@@ -224,7 +229,7 @@ def render_sullapps_portal_notice(portal_url: str = "https://sullapps.fedev.com.
                 <strong>🔐 Acceso Exclusivo vía SullApps Hub:</strong><br>
                 Por seguridad corporativa, debés ingresar desde el portal principal <b>SullApps</b> con tu clave única.
             </div>
-            <a href="{safe_url}" target="_top" style="
+            <a href="{safe_url}" target="_blank" rel="noopener noreferrer" style="
                 background: #006837;
                 color: #FFFFFF;
                 text-decoration: none;
@@ -239,26 +244,6 @@ def render_sullapps_portal_notice(portal_url: str = "https://sullapps.fedev.com.
         """,
         unsafe_allow_html=True,
     )
-
-    try:
-        components.html(
-            f"""
-            <script>
-            setTimeout(function() {{
-                try {{
-                    if (window.top === window.self) {{
-                        window.top.location.replace("{safe_url}?login_required=1");
-                    }}
-                }} catch (e) {{
-                    window.location.replace("{safe_url}?login_required=1");
-                }}
-            }}, 1200);
-            </script>
-            """,
-            height=0,
-        )
-    except Exception:
-        pass
     st.stop()
 
 
