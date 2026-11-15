@@ -645,14 +645,93 @@ if "map_zoom" not in st.session_state:
     st.session_state.map_zoom = 7
 if "map_theme" not in st.session_state:
     st.session_state.map_theme = "Claro (Mapa Corporativo)"
+# Paleta persistente (Supabase REST si está configurado + respaldo JSON local)
+_RUTA_PALETA_LOCAL = os.path.join(_PETROMAPS_DIR, "custom_colors.json")
+
+
+def _supabase_rest_headers():
+    try:
+        sb_url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        sb_key = str(st.secrets.get("SUPABASE_KEY", "")).strip()
+        if sb_url and sb_key:
+            return sb_url, {
+                "apikey": sb_key,
+                "Authorization": f"Bearer {sb_key}",
+                "Content-Type": "application/json",
+            }
+    except Exception:
+        pass
+    return None, None
+
+
+def _cargar_paleta_personalizada() -> dict:
+    sb_url, sb_headers = _supabase_rest_headers()
+    if sb_url and sb_headers:
+        try:
+            r = requests.get(
+                f"{sb_url}/rest/v1/petromaps_colores?select=nombre,hex_color&order=id.asc",
+                headers=sb_headers,
+                timeout=4,
+            )
+            if r.status_code == 200:
+                rows = r.json()
+                if isinstance(rows, list):
+                    return {
+                        str(row["nombre"]): str(row["hex_color"]).upper()
+                        for row in rows
+                        if row.get("nombre") and row.get("hex_color")
+                    }
+        except Exception:
+            pass
+
+    if os.path.exists(_RUTA_PALETA_LOCAL):
+        try:
+            with open(_RUTA_PALETA_LOCAL, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return {str(k): str(v).upper() for k, v in data.items()}
+        except Exception:
+            pass
+    return {}
+
+
+def _guardar_paleta_personalizada(paleta: dict, nuevo_nombre: str = "", nuevo_hex: str = "") -> str:
+    # 1. Intentar persistir en Supabase si está configurado en Secrets
+    sb_url, sb_headers = _supabase_rest_headers()
+    if sb_url and sb_headers and nuevo_nombre and nuevo_hex:
+        try:
+            headers_upsert = dict(sb_headers)
+            headers_upsert["Prefer"] = "resolution=merge-duplicates,return=minimal"
+            resp = requests.post(
+                f"{sb_url}/rest/v1/petromaps_colores",
+                headers=headers_upsert,
+                json={"nombre": nuevo_nombre, "hex_color": nuevo_hex.upper()},
+                timeout=5,
+            )
+            if resp.status_code in (200, 201, 204):
+                return "supabase"
+        except Exception:
+            pass
+
+    # 2. Respaldo en archivo JSON local
+    try:
+        with open(_RUTA_PALETA_LOCAL, "w", encoding="utf-8") as f:
+            json.dump(paleta, f, indent=2, ensure_ascii=False)
+        return "local"
+    except Exception:
+        return "session"
+
+
 if "color_activo_hex" not in st.session_state:
     st.session_state.color_activo_hex = "#2B5B84"
-if "color_picker_pincel" not in st.session_state:
-    st.session_state.color_picker_pincel = st.session_state.color_activo_hex
 if "preset_color_pincel" not in st.session_state:
     st.session_state.preset_color_pincel = "Azul Petróleo (#2B5B84)"
 if "paleta_personalizada" not in st.session_state:
-    st.session_state.paleta_personalizada = {}
+    st.session_state.paleta_personalizada = _cargar_paleta_personalizada()
+if "_pending_preset_color" not in st.session_state:
+    st.session_state._pending_preset_color = None
+if "_cp_nonce" not in st.session_state:
+    st.session_state._cp_nonce = 0
 if "modo_clic_mapa" not in st.session_state:
     st.session_state.modo_clic_mapa = "🖌️ Pintar / Recolorear"
 if "busqueda_estado" not in st.session_state:
@@ -770,11 +849,12 @@ def on_preset_color_change():
     paletas = _todas_las_paletas()
     if seleccion in paletas:
         st.session_state.color_activo_hex = paletas[seleccion]
-        st.session_state.color_picker_pincel = paletas[seleccion]
+        st.session_state._cp_nonce = st.session_state.get("_cp_nonce", 0) + 1
 
 
 def on_custom_color_change():
-    nuevo_hex = st.session_state.get("color_picker_pincel")
+    cp_key = f"color_picker_pincel_{st.session_state.get('_cp_nonce', 0)}"
+    nuevo_hex = st.session_state.get(cp_key)
     if nuevo_hex:
         st.session_state.color_activo_hex = nuevo_hex
 
@@ -1319,6 +1399,9 @@ with st.sidebar:
         + list(st.session_state.paleta_personalizada.keys())
         + ["Color personalizado..."]
     )
+    pending_preset = st.session_state.pop("_pending_preset_color", None)
+    if pending_preset and pending_preset in opciones_paleta:
+        st.session_state.preset_color_pincel = pending_preset
     if st.session_state.get("preset_color_pincel") not in opciones_paleta:
         st.session_state.preset_color_pincel = opciones_paleta[0]
 
@@ -1331,12 +1414,16 @@ with st.sidebar:
     )
 
     if st.session_state.get("preset_color_pincel") == "Color personalizado...":
-        st.color_picker(
+        cp_key = f"color_picker_pincel_{st.session_state.get('_cp_nonce', 0)}"
+        picked_hex = st.color_picker(
             "Elegí tu color personalizado:",
             value=st.session_state.color_activo_hex,
-            key="color_picker_pincel",
+            key=cp_key,
             on_change=on_custom_color_change,
         )
+        if picked_hex:
+            st.session_state.color_activo_hex = picked_hex
+
         c_save_n, c_save_b = st.columns([2, 1])
         with c_save_n:
             nombre_tono = st.text_input(
@@ -1349,10 +1436,19 @@ with st.sidebar:
             if st.button("💾 Guardar", key="btn_save_custom_tone", use_container_width=True):
                 hex_val = st.session_state.color_activo_hex.upper()
                 label_tono = (nombre_tono or "").strip() or f"Personalizado ({hex_val})"
-                etiqueta_final = f"★ {label_tono} ({hex_val})"
+                etiqueta_final = label_tono if label_tono.startswith("★") else f"★ {label_tono} ({hex_val})"
                 st.session_state.paleta_personalizada[etiqueta_final] = hex_val
-                st.session_state.preset_color_pincel = etiqueta_final
-                st.session_state.ultimo_toast = f"🎨 Tono guardado: {etiqueta_final}"
+                destino = _guardar_paleta_personalizada(
+                    st.session_state.paleta_personalizada,
+                    nuevo_nombre=etiqueta_final,
+                    nuevo_hex=hex_val,
+                )
+                st.session_state._pending_preset_color = etiqueta_final
+                st.session_state.ultimo_toast = (
+                    f"🎨 Tono guardado en Supabase: {etiqueta_final}"
+                    if destino == "supabase"
+                    else f"🎨 Tono guardado: {etiqueta_final}"
+                )
                 st.rerun()
 
     color_activo_actual = st.session_state.get("color_activo_hex", "#2B5B84")
