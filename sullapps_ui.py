@@ -15,6 +15,7 @@ import hmac
 import hashlib
 import time
 import random
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 import streamlit as st
@@ -140,8 +141,10 @@ def verify_sullapps_sso(max_age_seconds: int = 86400) -> dict | None:
     """
     cached = st.session_state.get("_sullapps_sso_payload")
     if isinstance(cached, dict) and cached.get("username"):
+        st.session_state.pop("_sullapps_sso_error", None)
         return cached
 
+    st.session_state.pop("_sullapps_sso_error", None)
     try:
         qp = st.query_params
         sso_user = str(qp.get("sso_user", "")).strip()
@@ -159,12 +162,15 @@ def verify_sullapps_sso(max_age_seconds: int = 86400) -> dict | None:
         ts_int = int(sso_ts)
         now = int(time.time())
         if abs(now - ts_int) > max_age_seconds:
+            st.session_state["_sullapps_sso_error"] = "expired"
             return None
     except ValueError:
+        st.session_state["_sullapps_sso_error"] = "bad_sig"
         return None
 
     secret = _get_sso_secret()
     if not secret:
+        st.session_state["_sullapps_sso_error"] = "missing_secret"
         return None
 
     payload_formats = [
@@ -183,6 +189,7 @@ def verify_sullapps_sso(max_age_seconds: int = 86400) -> dict | None:
             break
 
     if not sig_valid:
+        st.session_state["_sullapps_sso_error"] = "bad_sig"
         return None
 
     identity = {
@@ -199,17 +206,47 @@ def clear_sullapps_sso() -> None:
     st.session_state.pop("_sullapps_sso_payload", None)
 
 
-def render_sullapps_portal_notice(portal_url: str = "https://sullapps.fedev.com.ar/default.php") -> None:
+def render_sullapps_portal_notice(
+    portal_url: str = "https://sullapps.fedev.com.ar/default.php",
+    app_slug: str = "",
+) -> None:
     """
     Bloquea el acceso directo no autenticado a los subdominios de Streamlit Cloud y ofrece
-    acceso directo al portal principal SullApps (`https://sullapps.fedev.com.ar/default.php`).
-    Nota: Streamlit Community Cloud ejecuta las apps dentro de un iframe con sandbox que bloquea
-    la redirección automática hacia `window.top`, por lo que el botón usa `target="_blank"`.
+    retorno directo a la app dentro de SullApps Hub (`redirect=/apps/<slug>/`).
+    Intenta redirección automática tras 4.5s (sujeta al sandbox de Streamlit Cloud) y provee
+    el botón manual con `target="_blank"`.
     """
     if not isinstance(portal_url, str) or not portal_url.strip().startswith(("http://", "https://")):
         portal_url = "https://sullapps.fedev.com.ar/default.php"
-    target_url = f"{portal_url.rstrip('/')}?login_required=1" if "?" not in portal_url else portal_url
+
+    clean_slug = str(app_slug or "").strip().strip("/").lower()
+    if clean_slug:
+        qs = urllib.parse.urlencode({
+            "login_required": "1",
+            "redirect": f"/apps/{clean_slug}/",
+            "app": clean_slug,
+        })
+    else:
+        qs = urllib.parse.urlencode({"login_required": "1"})
+
+    sep = "&" if "?" in portal_url else "?"
+    target_url = f"{portal_url.rstrip('/')}{sep}{qs}"
     safe_url = html.escape(target_url)
+
+    sso_err = st.session_state.get("_sullapps_sso_error")
+    if sso_err == "missing_secret":
+        st.warning(
+            "⚠️ **Configuración pendiente en Streamlit Cloud:** falta cargar `SSO_SECRET` en "
+            "**Settings → Secrets** de esta app (debe coincidir con `SULLAPPS_SSO_SECRET` del `.env` en Hostinger)."
+        )
+    elif sso_err == "bad_sig":
+        st.warning(
+            "⚠️ **Firma SSO inválida:** el valor `SSO_SECRET` en Streamlit Cloud no coincide con "
+            "`SULLAPPS_SSO_SECRET` configurado en Hostinger."
+        )
+    elif sso_err == "expired":
+        st.warning("⚠️ **Token SSO expirado:** volvé a ingresar desde SullApps Hub para renovar tu acceso.")
+
     st.markdown(
         f"""
         <div style="
@@ -228,6 +265,9 @@ def render_sullapps_portal_notice(portal_url: str = "https://sullapps.fedev.com.
             <div style="font-size: 0.94rem; color: #064E3B; line-height: 1.5;">
                 <strong>🔐 Acceso Exclusivo vía SullApps Hub:</strong><br>
                 Por seguridad corporativa, debés ingresar desde el portal principal <b>SullApps</b> con tu clave única.
+                <div style="font-size: 0.78rem; color: #047857; margin-top: 4px;">
+                    Si el navegador bloquea la redirección automática desde Streamlit, presioná el botón para iniciar sesión y volver a esta app.
+                </div>
             </div>
             <a href="{safe_url}" target="_blank" rel="noopener noreferrer" style="
                 background: #006837;
@@ -244,6 +284,30 @@ def render_sullapps_portal_notice(portal_url: str = "https://sullapps.fedev.com.
         """,
         unsafe_allow_html=True,
     )
+
+    try:
+        js_url = json.dumps(target_url)
+        components.html(
+            f"""
+            <script>
+            setTimeout(function() {{
+                try {{
+                    if (window.top && window.top !== window.self) {{
+                        window.top.location.replace({js_url});
+                    }} else {{
+                        window.location.replace({js_url});
+                    }}
+                }} catch (e) {{
+                    // Streamlit Community Cloud sandbox bloquea navegación automática cross-origin;
+                    // el usuario dispone del botón manual con target="_blank".
+                }}
+            }}, 4500);
+            </script>
+            """,
+            height=0,
+        )
+    except Exception:
+        pass
     st.stop()
 
 
@@ -438,22 +502,70 @@ def inject_custom_css() -> None:
             display: none !important;
         }
 
-        /* Keep header minimal & transparent so sidebar toggle remains clickable */
+        /* Keep header minimal & transparent while guaranteeing sidebar toggle stays visible & clickable on desktop & mobile */
         header[data-testid="stHeader"] {
             background: transparent !important;
-            height: 2.5rem !important;
-            pointer-events: none;
+            height: 2.85rem !important;
+            pointer-events: none !important;
+            z-index: 999990 !important;
         }
-        header[data-testid="stHeader"] button,
+        header[data-testid="stHeader"] [data-testid="stToolbar"],
         [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="stExpandSidebarButton"],
         [data-testid="stSidebarCollapseButton"] {
             pointer-events: auto !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            z-index: 999999 !important;
+        }
+        [data-testid="collapsedControl"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="stExpandSidebarButton"] {
+            display: inline-flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            position: fixed !important;
+            top: 0.55rem !important;
+            left: 0.65rem !important;
+            background: #FFFFFF !important;
+            border: 1.5px solid #006837 !important;
+            border-radius: 10px !important;
+            box-shadow: 0 3px 10px rgba(0, 104, 55, 0.22) !important;
+            color: #006837 !important;
+            min-width: 2.35rem !important;
+            min-height: 2.35rem !important;
+        }
+        header[data-testid="stHeader"] button,
+        [data-testid="collapsedControl"] button,
+        [data-testid="stSidebarCollapsedControl"] button,
+        [data-testid="stExpandSidebarButton"] button,
+        [data-testid="stSidebarCollapseButton"] button {
+            pointer-events: auto !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            color: #006837 !important;
+        }
+        [data-testid="collapsedControl"] svg,
+        [data-testid="stSidebarCollapsedControl"] svg,
+        [data-testid="stExpandSidebarButton"] svg,
+        [data-testid="stSidebarCollapseButton"] svg {
+            fill: #006837 !important;
+            color: #006837 !important;
         }
 
         /* Clean container spacing for embedded & full-screen views */
         .block-container {
             padding-top: 1.75rem !important;
             padding-bottom: 2.5rem !important;
+        }
+        @media (max-width: 768px) {
+            .block-container {
+                padding-top: 3.35rem !important;
+                padding-left: 0.85rem !important;
+                padding-right: 0.85rem !important;
+                padding-bottom: 2.25rem !important;
+            }
         }
 
         /* Primary Action Buttons */

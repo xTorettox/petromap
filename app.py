@@ -9,6 +9,7 @@ import re
 import json
 import os
 import io
+import base64
 import shutil
 import zipfile
 import html
@@ -44,12 +45,155 @@ from sullapps_ui import (
     render_sullapps_portal_notice,
 )
 
+_PETROMAPS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PETROMAPS_LOGO_PATH = os.path.join(_PETROMAPS_DIR, "assets", "logo_petromaps.png")
+_SULLAIR_LOGO_PATH = (
+    os.path.join(_PETROMAPS_DIR, "assets", "logo_sullair.png")
+    if os.path.exists(os.path.join(_PETROMAPS_DIR, "assets", "logo_sullair.png"))
+    else os.path.join(_PETROMAPS_DIR, "Logo Sullair Verde.png")
+)
+
 st.set_page_config(
     page_title="PetroMaps | Áreas Hidrocarburíferas",
-    page_icon="🛢️",
+    page_icon=_PETROMAPS_LOGO_PATH if os.path.exists(_PETROMAPS_LOGO_PATH) else "🛢️",
     layout="wide",
+    initial_sidebar_state="auto",
 )
 inject_custom_css()
+
+st.markdown(
+    """
+    <style>
+    .pm-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        flex-wrap: wrap;
+        background: linear-gradient(135deg, #FFFFFF 0%, #F4FAF6 100%);
+        border: 1px solid #D1FAE5;
+        border-left: 5px solid #006837;
+        border-radius: 14px;
+        padding: 10px 16px;
+        margin-bottom: 12px;
+        box-shadow: 0 3px 12px rgba(0, 104, 55, 0.07);
+    }
+    .pm-brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+    }
+    .pm-brand img {
+        height: 44px;
+        width: auto;
+        object-fit: contain;
+        border-radius: 10px;
+        flex-shrink: 0;
+    }
+    .pm-title-wrap {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+    }
+    .pm-brand-name {
+        font-size: 1.08rem;
+        font-weight: 800;
+        color: #064E3B;
+        line-height: 1.15;
+        letter-spacing: -0.01em;
+    }
+    .pm-subtitle {
+        font-size: 0.80rem;
+        font-weight: 600;
+        color: #4B5563;
+        margin-top: 2px;
+    }
+    .pm-pill-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: #E6F4EA;
+        color: #006837;
+        border: 1px solid #BBF7D0;
+        border-radius: 999px;
+        padding: 4px 11px;
+        font-size: 0.76rem;
+        font-weight: 700;
+        white-space: nowrap;
+    }
+    .pm-swatch-box {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: #F8FAFC;
+        border: 1px solid #E2E8F0;
+        border-radius: 8px;
+        padding: 6px 10px;
+        margin-top: 6px;
+        margin-bottom: 6px;
+        font-size: 0.80rem;
+        color: #1E293B;
+    }
+    .pm-swatch-dot {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        border: 1.5px solid #1E293B;
+        flex-shrink: 0;
+    }
+    .pm-search-status {
+        margin-top: 6px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        font-size: 0.80rem;
+        font-weight: 600;
+        line-height: 1.35;
+        word-break: break-word;
+    }
+    .pm-search-ok {
+        background: #ECFDF5;
+        color: #065F46;
+        border: 1px solid #A7F3D0;
+    }
+    .pm-search-err {
+        background: #FEF2F2;
+        color: #991B1B;
+        border: 1px solid #FECACA;
+    }
+    .pm-search-loading {
+        background: #EFF6FF;
+        color: #1E40AF;
+        border: 1px solid #BFDBFE;
+    }
+    @media (max-width: 768px) {
+        .pm-header {
+            padding: 9px 12px;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+        .pm-brand img {
+            height: 36px;
+        }
+        .pm-brand-name {
+            font-size: 0.96rem;
+        }
+        .pm-subtitle {
+            font-size: 0.74rem;
+        }
+        iframe[title="streamlit_folium.st_folium"] {
+            height: 410px !important;
+            min-height: 350px !important;
+        }
+        div[data-testid="stButton"] button,
+        div[data-testid="stDownloadButton"] button {
+            min-height: 42px !important;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ==============================================================================
 # 0. SISTEMA DE LOGIN UNIFICADO (SSO SULLAPPS + CONTROL DE ACCESO)
@@ -79,7 +223,7 @@ if not st.session_state.usuario:
         except Exception:
             st.title("SULLAIR ARGENTINA")
 
-        render_sullapps_portal_notice()
+        render_sullapps_portal_notice(app_slug="petromaps")
     st.stop()
 
 # ==============================================================================
@@ -501,21 +645,56 @@ if "map_zoom" not in st.session_state:
     st.session_state.map_zoom = 7
 if "map_theme" not in st.session_state:
     st.session_state.map_theme = "Claro (Mapa Corporativo)"
+if "color_activo_hex" not in st.session_state:
+    st.session_state.color_activo_hex = "#2B5B84"
 if "color_picker_pincel" not in st.session_state:
-    st.session_state.color_picker_pincel = "#2B5B84"
+    st.session_state.color_picker_pincel = st.session_state.color_activo_hex
 if "preset_color_pincel" not in st.session_state:
     st.session_state.preset_color_pincel = "Azul Petróleo (#2B5B84)"
+if "paleta_personalizada" not in st.session_state:
+    st.session_state.paleta_personalizada = {}
+if "modo_clic_mapa" not in st.session_state:
+    st.session_state.modo_clic_mapa = "🖌️ Pintar / Recolorear"
+if "busqueda_estado" not in st.session_state:
+    st.session_state.busqueda_estado = None
+if "_pending_search_run" not in st.session_state:
+    st.session_state._pending_search_run = False
+if "_skip_viewport_sync" not in st.session_state:
+    st.session_state._skip_viewport_sync = False
+if "_sync_multiselect_nonce" not in st.session_state:
+    st.session_state._sync_multiselect_nonce = 0
+if "ultimo_toast" not in st.session_state:
+    st.session_state.ultimo_toast = None
 
 # ==============================================================================
-# 5. INTERCEPCIÓN DE CLICS EN EL MAPA (1 SOLO PASO)
+# 5. INTERCEPCIÓN DE CLICS EN EL MAPA Y PRESERVACIÓN EXACTA DE ZOOM / CENTRO
 # ==============================================================================
 estado_previo_mapa = st.session_state.get("mapa_folium")
+
+# Conservar encuadre exacto (centro y zoom) del viewport al interactuar o pintar
+if estado_previo_mapa and not st.session_state.get("_skip_viewport_sync", False):
+    prev_center = estado_previo_mapa.get("center")
+    prev_zoom = estado_previo_mapa.get("zoom")
+    if isinstance(prev_center, dict) and "lat" in prev_center and "lng" in prev_center:
+        try:
+            st.session_state.map_center = [float(prev_center["lat"]), float(prev_center["lng"])]
+        except Exception:
+            pass
+    if prev_zoom is not None:
+        try:
+            st.session_state.map_zoom = float(prev_zoom)
+        except Exception:
+            pass
+
 if estado_previo_mapa and estado_previo_mapa.get("last_active_drawing"):
     dibujo_activo = estado_previo_mapa["last_active_drawing"]
     props = dibujo_activo.get("properties", {})
     nombre_clic = str(props.get(COL_NOMBRE, ""))
+    lc = estado_previo_mapa.get("last_clicked") or {}
+    lc_lat = f"{float(lc['lat']):.6f}" if isinstance(lc, dict) and lc.get("lat") is not None else ""
+    lc_lng = f"{float(lc['lng']):.6f}" if isinstance(lc, dict) and lc.get("lng") is not None else ""
 
-    firma_clic = f"{nombre_clic}_{dibujo_activo.get('id', '')}"
+    firma_clic = f"{nombre_clic}|{dibujo_activo.get('id', '')}|{lc_lat}|{lc_lng}"
 
     if firma_clic != st.session_state.ultimo_dibujo_procesado:
         st.session_state.ultimo_dibujo_procesado = firma_clic
@@ -540,31 +719,69 @@ if estado_previo_mapa and estado_previo_mapa.get("last_active_drawing"):
             st.session_state.ultima_operadora = operador_clic
             st.session_state.ultimo_nombre_area = nombre_clic
 
-        color_actual = st.session_state.get("color_picker_pincel", "#2B5B84")
+        color_actual = st.session_state.get("color_activo_hex", "#2B5B84")
+        modo_clic = st.session_state.get("modo_clic_mapa", "🖌️ Pintar / Recolorear")
         if nombre_clic:
-            if nombre_clic in st.session_state.areas_pintadas:
-                del st.session_state.areas_pintadas[nombre_clic]
+            if modo_clic.startswith("🧹"):
+                if nombre_clic in st.session_state.areas_pintadas:
+                    del st.session_state.areas_pintadas[nombre_clic]
+                    st.session_state._sync_multiselect_nonce += 1
+                    st.session_state.ultimo_toast = f"🧹 Quitada del listado: {nombre_clic}"
             else:
-                st.session_state.areas_pintadas[nombre_clic] = {
-                    "color": color_actual,
-                    "operadora": operador_clic,
-                    "lat": lat_clic,
-                    "lon": lon_clic,
-                    "gms": gms_clic,
-                }
+                existente = st.session_state.areas_pintadas.get(nombre_clic)
+                if existente:
+                    color_prev = (existente.get("color") or "").lower()
+                    if color_prev != color_actual.lower():
+                        st.session_state.areas_pintadas[nombre_clic] = {
+                            "color": color_actual,
+                            "operadora": operador_clic,
+                            "lat": lat_clic,
+                            "lon": lon_clic,
+                            "gms": gms_clic,
+                        }
+                        st.session_state.ultimo_toast = f"🔄 Color actualizado ({color_actual}) en {nombre_clic}"
+                    else:
+                        del st.session_state.areas_pintadas[nombre_clic]
+                        st.session_state._sync_multiselect_nonce += 1
+                        st.session_state.ultimo_toast = f"🗑️ Despintada: {nombre_clic}"
+                else:
+                    st.session_state.areas_pintadas[nombre_clic] = {
+                        "color": color_actual,
+                        "operadora": operador_clic,
+                        "lat": lat_clic,
+                        "lon": lon_clic,
+                        "gms": gms_clic,
+                    }
+                    st.session_state._sync_multiselect_nonce += 1
+                    st.session_state.ultimo_toast = f"🖌️ Pintada y agregada al listado: {nombre_clic}"
 
 
 # ==============================================================================
 # 6. MANEJADORES DE FILTROS, PALETA Y BÚSQUEDA
 # ==============================================================================
+def _todas_las_paletas() -> dict:
+    combinada = dict(PALETA_PROFESIONAL)
+    combinada.update(st.session_state.get("paleta_personalizada", {}))
+    return combinada
+
+
 def on_preset_color_change():
     seleccion = st.session_state.get("preset_color_pincel")
-    if seleccion in PALETA_PROFESIONAL:
-        st.session_state.color_picker_pincel = PALETA_PROFESIONAL[seleccion]
+    paletas = _todas_las_paletas()
+    if seleccion in paletas:
+        st.session_state.color_activo_hex = paletas[seleccion]
+        st.session_state.color_picker_pincel = paletas[seleccion]
+
+
+def on_custom_color_change():
+    nuevo_hex = st.session_state.get("color_picker_pincel")
+    if nuevo_hex:
+        st.session_state.color_activo_hex = nuevo_hex
 
 
 def on_area_change():
     st.session_state.operadora_elegida = "TODAS"
+    st.session_state._skip_viewport_sync = True
     area_sel = st.session_state.area_elegida
     if area_sel != "TODAS" and area_sel in lookup_areas:
         info = lookup_areas[area_sel]
@@ -580,15 +797,26 @@ def on_operadora_change():
     st.session_state.area_elegida = "TODAS"
 
 
+def programar_busqueda():
+    st.session_state._pending_search_run = True
+
+
 def procesar_busqueda():
-    texto = st.session_state.get("input_coords", "")
+    texto = (st.session_state.get("input_coords", "") or "").strip()
+    if not texto:
+        st.session_state.punto_buscado = None
+        st.session_state.busqueda_estado = None
+        return
+
     lat, lon = extraer_coordenadas(texto)
 
     if lat is not None and lon is not None:
+        st.session_state._skip_viewport_sync = True
         st.session_state.punto_buscado = [lat, lon]
         st.session_state.ultimas_coordenadas = (lat, lon)
         st.session_state.map_center = [lat, lon]
         st.session_state.map_zoom = 14
+        gms_res = decimal_a_gms(lat, lon)
 
         punto = Point(lon, lat)
         area_encontrada = gdf_completo[gdf_completo.geometry.contains(punto)]
@@ -600,11 +828,23 @@ def procesar_busqueda():
             st.session_state.operadora_elegida = "TODAS"
             st.session_state.ultima_operadora = operador
             st.session_state.ultimo_nombre_area = nombre
+            st.session_state.busqueda_estado = (
+                "ok",
+                f"✅ Ubicación cargada en {nombre} ({operador}) · {gms_res}",
+            )
         else:
             st.session_state.ultima_operadora = None
             st.session_state.ultimo_nombre_area = None
+            st.session_state.busqueda_estado = (
+                "ok",
+                f"✅ Coordenadas cargadas: {gms_res} (fuera de áreas catastradas)",
+            )
     else:
         st.session_state.punto_buscado = None
+        st.session_state.busqueda_estado = (
+            "error",
+            "❌ No se pudieron interpretar coordenadas o el enlace de Maps. Pegá un link válido o coordenadas GMS/decimales.",
+        )
 
 
 # ==============================================================================
@@ -1017,10 +1257,13 @@ def agregar_capa_ruta_logistica(mapa_folium, puntos_ruta, nombre="Ruta Logístic
 # 9. BARRA LATERAL (FILTROS, PINCEL, BASES SULLAIR, EXPORTACIÓN Y ADMIN)
 # ==============================================================================
 with st.sidebar:
-    try:
-        st.image("Logo Sullair Verde.png", use_container_width=True)
-    except Exception:
-        st.warning("Falta el logo de Sullair en la carpeta.")
+    c_logo1, c_logo2 = st.columns([1.2, 1])
+    with c_logo1:
+        if os.path.exists(_SULLAIR_LOGO_PATH):
+            st.image(_SULLAIR_LOGO_PATH, use_container_width=True)
+    with c_logo2:
+        if os.path.exists(_PETROMAPS_LOGO_PATH):
+            st.image(_PETROMAPS_LOGO_PATH, width=74)
 
     # --- BOTÓN DE LIMPIEZA GLOBAL ---
     if st.button("🧹 Limpiar Mapa", type="primary", use_container_width=True):
@@ -1028,6 +1271,7 @@ with st.sidebar:
         st.session_state.operadora_elegida = "TODAS"
         st.session_state.punto_buscado = None
         st.session_state.input_coords = ""
+        st.session_state.busqueda_estado = None
         st.session_state.areas_pintadas = {}
         st.session_state.ultimo_dibujo_procesado = None
         st.session_state.ultimas_coordenadas = None
@@ -1035,6 +1279,8 @@ with st.sidebar:
         st.session_state.ultimo_nombre_area = None
         st.session_state.map_center = CENTRO_DEFECTO
         st.session_state.map_zoom = 7
+        st.session_state._skip_viewport_sync = True
+        st.session_state._sync_multiselect_nonce += 1
         st.rerun()
 
     st.divider()
@@ -1059,9 +1305,23 @@ with st.sidebar:
 
     st.divider()
 
-    # --- PINCEL DE SELECCIÓN CON PALETA PROFESIONAL ---
+    # --- PINCEL DE SELECCIÓN CON PALETA PROFESIONAL Y COLOR PERSONALIZADO ---
     st.header("🎨 Pincel de Selección")
-    opciones_paleta = list(PALETA_PROFESIONAL.keys()) + ["Color personalizado..."]
+    st.radio(
+        "Modo al tocar el mapa:",
+        options=["🖌️ Pintar / Recolorear", "🧹 Borrar con clic"],
+        key="modo_clic_mapa",
+        horizontal=True,
+    )
+
+    opciones_paleta = (
+        list(PALETA_PROFESIONAL.keys())
+        + list(st.session_state.paleta_personalizada.keys())
+        + ["Color personalizado..."]
+    )
+    if st.session_state.get("preset_color_pincel") not in opciones_paleta:
+        st.session_state.preset_color_pincel = opciones_paleta[0]
+
     st.selectbox(
         "Tono profesional:",
         options=opciones_paleta,
@@ -1069,15 +1329,49 @@ with st.sidebar:
         on_change=on_preset_color_change,
         help="Colores ejecutivos calibrados para cartografía técnica y reportes PDF.",
     )
-    color_pincel = st.color_picker(
-        "Ajustar color activo:",
-        key="color_picker_pincel",
+
+    if st.session_state.get("preset_color_pincel") == "Color personalizado...":
+        st.color_picker(
+            "Elegí tu color personalizado:",
+            value=st.session_state.color_activo_hex,
+            key="color_picker_pincel",
+            on_change=on_custom_color_change,
+        )
+        c_save_n, c_save_b = st.columns([2, 1])
+        with c_save_n:
+            nombre_tono = st.text_input(
+                "Nombre opcional:",
+                placeholder="Ej: YPF Custom",
+                key="custom_tone_name",
+                label_visibility="collapsed",
+            )
+        with c_save_b:
+            if st.button("💾 Guardar", key="btn_save_custom_tone", use_container_width=True):
+                hex_val = st.session_state.color_activo_hex.upper()
+                label_tono = (nombre_tono or "").strip() or f"Personalizado ({hex_val})"
+                etiqueta_final = f"★ {label_tono} ({hex_val})"
+                st.session_state.paleta_personalizada[etiqueta_final] = hex_val
+                st.session_state.preset_color_pincel = etiqueta_final
+                st.session_state.ultimo_toast = f"🎨 Tono guardado: {etiqueta_final}"
+                st.rerun()
+
+    color_activo_actual = st.session_state.get("color_activo_hex", "#2B5B84")
+    st.markdown(
+        f"""
+        <div class="pm-swatch-box">
+            <span class="pm-swatch-dot" style="background:{color_activo_actual};"></span>
+            <span>Pincel activo: <b>{color_activo_actual.upper()}</b></span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+
     num_pintadas = len(st.session_state.areas_pintadas)
     if num_pintadas > 0:
         st.caption(f"🖌️ Áreas pintadas activas: **{num_pintadas}**")
         if st.button("🗑️ Despintar todas las áreas", use_container_width=True):
             st.session_state.areas_pintadas = {}
+            st.session_state._sync_multiselect_nonce += 1
             st.rerun()
 
     st.divider()
@@ -1090,6 +1384,7 @@ with st.sidebar:
             st.write(f"🟢 **{p['nombre']}**")
         with col_b2:
             if st.button("📍 Ir", key=f"btn_ir_{p['id']}"):
+                st.session_state._skip_viewport_sync = True
                 st.session_state.map_center = [p["lat"], p["lon"]]
                 st.session_state.map_zoom = 13
                 st.session_state.ultimas_coordenadas = (p["lat"], p["lon"])
@@ -1109,9 +1404,38 @@ with st.sidebar:
 
     st.divider()
 
-    # --- BÚSQUEDA DE COORDENADAS ---
+    # --- BÚSQUEDA DE COORDENADAS Y ENLACES ---
     st.header("📍 Buscar Coordenadas")
-    st.text_input("Pegá un link de Maps o coordenadas (GMS o Decimales):", key="input_coords", on_change=procesar_busqueda)
+    c_inp, c_go = st.columns([3.2, 1])
+    with c_inp:
+        st.text_input(
+            "Pegá un link de Maps o coordenadas (GMS o Decimales):",
+            key="input_coords",
+            on_change=programar_busqueda,
+            placeholder="https://maps.app.goo.gl/... o -38.33, -68.82",
+        )
+    with c_go:
+        st.markdown("<div style='height:27px'></div>", unsafe_allow_html=True)
+        if st.button("🔍", key="btn_buscar_coords", use_container_width=True, help="Buscar ubicación"):
+            programar_busqueda()
+
+    search_status_slot = st.empty()
+    if st.session_state.pop("_pending_search_run", False):
+        search_status_slot.markdown(
+            '<div class="pm-search-status pm-search-loading">⏳ Procesando enlace y buscando coordenadas...</div>',
+            unsafe_allow_html=True,
+        )
+        procesar_busqueda()
+        st.rerun()
+
+    estado_busq = st.session_state.get("busqueda_estado")
+    if isinstance(estado_busq, tuple) and len(estado_busq) == 2:
+        tipo_b, msg_b = estado_busq
+        css_cls = "pm-search-ok" if tipo_b == "ok" else "pm-search-err"
+        search_status_slot.markdown(
+            f'<div class="pm-search-status {css_cls}">{html.escape(msg_b)}</div>',
+            unsafe_allow_html=True,
+        )
 
     st.divider()
 
@@ -1276,9 +1600,44 @@ if ruta_activa:
     agregar_capa_ruta_logistica(mapa, ruta_activa, nombre="Ruta de Abastecimiento")
 
 # ==============================================================================
-# 11. RENDERIZADO, DISPLAY GMS UNIFICADO Y MAPA
+# 11. RENDERIZADO, HEADER BRANDING, DISPLAY GMS MÓVIL Y MAPA
 # ==============================================================================
-st.title("🗺️ Visor de Áreas Hidrocarburíferas")
+if st.session_state.get("ultimo_toast"):
+    try:
+        st.toast(st.session_state.ultimo_toast)
+    except Exception:
+        pass
+    st.session_state.ultimo_toast = None
+
+_pm_logo_b64 = ""
+if os.path.exists(_PETROMAPS_LOGO_PATH):
+    try:
+        with open(_PETROMAPS_LOGO_PATH, "rb") as _f_pm:
+            _pm_logo_b64 = base64.b64encode(_f_pm.read()).decode("ascii")
+    except Exception:
+        _pm_logo_b64 = ""
+
+_logo_img_tag = (
+    f'<img src="data:image/png;base64,{_pm_logo_b64}" alt="PetroMaps" />'
+    if _pm_logo_b64
+    else '<span style="font-size:1.75rem;">🛢️</span>'
+)
+
+st.markdown(
+    f"""
+    <div class="pm-header">
+        <div class="pm-brand">
+            {_logo_img_tag}
+            <div class="pm-title-wrap">
+                <div class="pm-brand-name">PetroMaps</div>
+                <div class="pm-subtitle">Visor de Áreas Hidrocarburíferas</div>
+            </div>
+        </div>
+        <span class="pm-pill-chip">🎨 {len(st.session_state.areas_pintadas)} en listado</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if st.session_state.ultimas_coordenadas:
     lat_act, lon_act = st.session_state.ultimas_coordenadas
@@ -1380,6 +1739,30 @@ if st.session_state.ultimas_coordenadas:
             opacity: 0.92;
             transform: translateY(-1px);
         }}
+        @media (max-width: 640px) {{
+            .banner {{
+                flex-direction: column;
+                align-items: flex-start;
+                height: auto;
+                padding: 8px 10px;
+                gap: 6px;
+            }}
+            .info-text {{
+                white-space: normal;
+                flex-wrap: wrap;
+                font-size: 12.2px;
+                line-height: 1.3;
+            }}
+            .actions-group {{
+                width: 100%;
+                flex-wrap: wrap;
+                gap: 5px;
+            }}
+            .btn-copy {{
+                padding: 5px 9px;
+                font-size: 11.8px;
+            }}
+        }}
     </style>
     </head>
     <body>
@@ -1445,29 +1828,78 @@ if st.session_state.ultimas_coordenadas:
     </body>
     </html>
     """
-    components.html(banner_html, height=48)
+    components.html(banner_html, height=78)
 else:
     st.info(
-        "📍 **Coordenadas Activas:** Seleccioná un área en el mapa, una base Sullair o ingresá coordenadas en el buscador lateral para ver detalles y copiarlas."
+        "📍 **Coordenadas Activas:** Tocá un área en el mapa, usá el listado rápido inferior o buscá por enlace/coordenadas en el menú lateral."
     )
 
-# Renderizado de Folium ultra fluido con st_folium
+# Renderizado de Folium ultra fluido con bloqueo exacto de zoom/centro
 st_folium(
     mapa,
     key="mapa_folium",
     width=None,
     use_container_width=True,
     height=600,
-    returned_objects=["last_active_drawing"],
+    returned_objects=["last_active_drawing", "last_clicked", "center", "zoom"],
 )
+st.session_state._skip_viewport_sync = False
 
 # ==============================================================================
-# 12. EXPORTACIÓN DEL MAPA (IMAGEN PNG Y PDF CON CUADRO DE COORDENADAS) + TABLA
+# 12. CONSTRUCTOR INTUITIVO DE LISTADO + EXPORTACIÓN (PNG, PDF, CSV)
 # ==============================================================================
 st.markdown("---")
+
+todas_areas_catalogo = [a for a in lista_areas if a != "TODAS"]
+seleccion_actual_nombres = [a for a in st.session_state.areas_pintadas.keys() if a in todas_areas_catalogo]
+multiselect_key = f"ms_listado_areas_{st.session_state.get('_sync_multiselect_nonce', 0)}"
+
+with st.expander(f"📋 Armar Listado de Áreas para Imprimir / Exportar ({len(st.session_state.areas_pintadas)} seleccionadas)", expanded=True):
+    st.caption(
+        "Elegí áreas directamente desde esta lista (ideal en celular o zonas chicas) o tocá polígonos en el mapa. "
+        "Todo lo tildado acá se pinta en el mapa y sale en el reporte PDF/CSV."
+    )
+    elegidas_ms = st.multiselect(
+        "Áreas incluidas en el listado:",
+        options=todas_areas_catalogo,
+        default=seleccion_actual_nombres,
+        key=multiselect_key,
+        placeholder="Buscá y tildá áreas para sumar o quitar del listado...",
+    )
+
+    if set(elegidas_ms) != set(seleccion_actual_nombres):
+        nuevo_dic = {
+            k: v for k, v in st.session_state.areas_pintadas.items() if k not in todas_areas_catalogo
+        }
+        color_pincel_act = st.session_state.get("color_activo_hex", "#2B5B84")
+        for nom_a in elegidas_ms:
+            if nom_a in st.session_state.areas_pintadas:
+                nuevo_dic[nom_a] = st.session_state.areas_pintadas[nom_a]
+            else:
+                info_a = lookup_areas.get(nom_a, {})
+                nuevo_dic[nom_a] = {
+                    "color": color_pincel_act,
+                    "operadora": info_a.get("operador", "Sin operadora"),
+                    "lat": info_a.get("lat"),
+                    "lon": info_a.get("lon"),
+                    "gms": info_a.get("gms", ""),
+                }
+        st.session_state.areas_pintadas = nuevo_dic
+        st.rerun()
+
+    if st.session_state.areas_pintadas:
+        c_list_info, c_list_clr = st.columns([3, 1])
+        with c_list_info:
+            st.caption("💡 Tip: Para eliminar un área puntual sin usar el mapa, hacé clic en la **×** de su etiqueta arriba.")
+        with c_list_clr:
+            if st.button("🧹 Vaciar listado", key="btn_vaciar_listado_export", use_container_width=True):
+                st.session_state.areas_pintadas = {}
+                st.session_state._sync_multiselect_nonce += 1
+                st.rerun()
+
 col_exp_title, col_exp_zoom = st.columns([2.2, 1.8])
 with col_exp_title:
-    st.subheader(f"📋 Áreas Seleccionadas y Exportación ({len(st.session_state.areas_pintadas)} pintadas)")
+    st.subheader(f"📥 Exportar Mapa y Reporte ({len(st.session_state.areas_pintadas)} áreas)")
 with col_exp_zoom:
     encuadre_export = st.radio(
         "Encuadre al exportar imagen/PDF:",
