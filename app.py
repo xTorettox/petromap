@@ -730,6 +730,10 @@ if "paleta_personalizada" not in st.session_state:
     st.session_state.paleta_personalizada = _cargar_paleta_personalizada()
 if "_pending_preset_color" not in st.session_state:
     st.session_state._pending_preset_color = None
+if "_pending_area_elegida" not in st.session_state:
+    st.session_state._pending_area_elegida = None
+if "_pending_operadora_elegida" not in st.session_state:
+    st.session_state._pending_operadora_elegida = None
 if "_cp_nonce" not in st.session_state:
     st.session_state._cp_nonce = 0
 if "modo_clic_mapa" not in st.session_state:
@@ -904,8 +908,8 @@ def procesar_busqueda():
         if not area_encontrada.empty:
             nombre = str(area_encontrada.iloc[0][COL_NOMBRE])
             operador = str(area_encontrada.iloc[0][COL_OPERADORA])
-            st.session_state.area_elegida = nombre
-            st.session_state.operadora_elegida = "TODAS"
+            st.session_state._pending_area_elegida = nombre
+            st.session_state._pending_operadora_elegida = "TODAS"
             st.session_state.ultima_operadora = operador
             st.session_state.ultimo_nombre_area = nombre
             st.session_state.busqueda_estado = (
@@ -1494,6 +1498,13 @@ with st.sidebar:
     st.header("🔎 Filtros del Mapa")
     lista_areas = ["TODAS"] + sorted(gdf_completo[COL_NOMBRE].dropna().astype(str).unique().tolist())
     lista_operadoras = ["TODAS"] + sorted(gdf_completo[COL_OPERADORA].dropna().astype(str).unique().tolist())
+
+    pending_area = st.session_state.pop("_pending_area_elegida", None)
+    if pending_area and pending_area in lista_areas:
+        st.session_state.area_elegida = pending_area
+    pending_op = st.session_state.pop("_pending_operadora_elegida", None)
+    if pending_op and pending_op in lista_operadoras:
+        st.session_state.operadora_elegida = pending_op
 
     st.selectbox("Iluminar un Área específica:", lista_areas, key="area_elegida", on_change=on_area_change)
     st.selectbox("Iluminar por Empresa operadora:", lista_operadoras, key="operadora_elegida", on_change=on_operadora_change)
